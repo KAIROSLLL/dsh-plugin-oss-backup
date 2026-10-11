@@ -19,6 +19,7 @@ import {
   fetchState,
   saveCredentials,
   saveSettings,
+  FAIL_PATH,
   SHOT_PATH,
   startManualBackup,
   type AutoBackupReport,
@@ -184,6 +185,8 @@ export const CSS = [
   '.ob-shot{width:100%;max-width:340px;border-radius:12px;border:1px solid var(--dsw-alias-border-l1);align-self:flex-start}',
   '.ob-icon.on{color:var(--dsw-alias-brand-primary)}',
   '.ob-shot-wrap{display:flex;flex-direction:column;gap:4px;align-items:flex-start}',
+  // 游戏失败那张图：圆角 + 轻阴影，别让它像贴上去的。
+  '.ob-fail-shot{border-radius:12px;max-width:100%;box-shadow:0 2px 10px rgba(0,0,0,.18)}',
 ].join('\n')
 
 /**
@@ -326,6 +329,29 @@ export function UploadShot(props: { width: number; className?: string }): React.
     src: SHOT_PATH,
     width,
     alt: '代码在自己上传',
+    onError: () => setBroken(true),
+    style: { display: 'block', height: 'auto' },
+  })
+}
+
+/**
+ * 游戏失败时弹出的那张图。
+ *
+ * 图来自宿主路由 `/oss-backup/asset/fail`（包内 `assets/game-failed.jpg`），
+ * 同样不 base64 内联。取不到图时**不显示占位** —— 失败文案本身已经把事说清了，
+ * 再顶一张破图只会更难看。
+ *
+ * @param props - `width` 控制渲染宽度（像素），`className` 用于外部挂样式。
+ * @returns React 元素；图挂了就返回 `null`。
+ */
+export function UploadFail(props: { width: number; className?: string }): React.ReactElement | null {
+  const [broken, setBroken] = useState(false)
+  if (broken) return null
+  return React.createElement('img', {
+    className: props.className,
+    src: FAIL_PATH,
+    width: props.width,
+    alt: '偷数据公司给我跪下',
     onError: () => setBroken(true),
     style: { display: 'block', height: 'auto' },
   })
@@ -1223,9 +1249,13 @@ function BackupGame(props: {
       ),
     ]),
 
-    // 失败了要挨一句嘲讽。
+    // 失败了要挨一句嘲讽 + 弹那张图。图**一直显示**，直到玩家点「再来一局」或「放弃备份」
+    // （那两个按钮会把 phase 从 done 改走，这里自然就收了）。
     phase === 'done' && outcome !== null && !outcome.passed
-      ? React.createElement('div', { className: 'ob-warn', key: 'taunt' }, tauntFor(outcome))
+      ? React.createElement('div', { className: 'ob-row', key: 'taunt-row' }, [
+          React.createElement('div', { className: 'ob-warn', key: 'taunt' }, tauntFor(outcome)),
+          React.createElement(UploadFail, { key: 'img', width: 300, className: 'ob-fail-shot' }),
+        ])
       : null,
 
     React.createElement('div', { className: 'ob-game', key: 'stage' }, [

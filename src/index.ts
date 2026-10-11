@@ -86,6 +86,9 @@ export const STATE_ROUTE = '/oss-backup/state'
 /** 上传中弹出那张图的宿主路由（直接吐包内 assets 的字节，不做 base64）。 */
 export const SHOT_ROUTE = '/oss-backup/asset/shot'
 
+/** 游戏失败时弹出那张图的宿主路由（同样走 assets 字节，不内联进 bundle）。 */
+export const FAIL_ROUTE = '/oss-backup/asset/fail'
+
 /** 读写设置的路由：`GET` 读、`POST` 存。 */
 export const SETTINGS_ROUTE = '/oss-backup/settings'
 
@@ -105,6 +108,9 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 
 /** 上传中那张图的绝对路径。 */
 const SHOT_FILE = join(HERE, '..', 'assets', 'code-uploading.jpg')
+
+/** 游戏失败时那张图的绝对路径。 */
+const FAIL_FILE = join(HERE, '..', 'assets', 'game-failed.jpg')
 
 /** 历史记录保留条数（滚动覆盖）。 */
 const HISTORY_LIMIT = 20
@@ -1018,37 +1024,50 @@ export function apply(ctx: PluginContext): void {
     'oss-backup: 手动备份路由',
   )
 
-  // 上传中那张图：直接吐包内 assets 的字节。
-  // 走宿主路由而不是内联进 client bundle —— 图 500 KB 出头，内联要白白多下 700 KB base64。
-  ctx.effect(
-    () =>
-      webServer.register({
-        kind: 'exact',
-        path: SHOT_ROUTE,
-        handler: async (request: WebRequestLike, response: WebResponseLike) => {
-          const method = request.method
-          if (method !== undefined && method !== 'GET' && method !== 'HEAD') {
-            sendJson(response, 405, { ok: false, error: 'GET only' })
-            return
-          }
-          try {
-            const bytes = await readFile(SHOT_FILE)
-            response.writeHead(200, {
-              'content-type': 'image/jpeg',
-              // 图不会变，缓存一天；真要换图就 bump 插件版本。
-              'cache-control': 'public, max-age=86400',
-              'content-length': String(bytes.length),
-            })
-            response.end(bytes)
-          } catch (error) {
-            // 缺素材时给一句可读的话（已脱敏）；前端会回退到内置 SVG，不会开天窗。
-            response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
-            response.end(redactSecrets(`asset unavailable: ${safeErrorMessage(error)}`))
-          }
-        },
-      }),
-    'oss-backup: 上传中那张图',
-  )
+  /**
+   * 注册一张包内素材图。
+   *
+   * 走宿主路由直接吐字节，而不是内联进 client bundle —— 这两张图加起来 700 KB 出头，
+   * base64 内联会让每个浏览器白白多下约 1 MB。
+   *
+   * @param route - 路由路径。
+   * @param file - 素材的绝对路径。
+   * @param label - 日志里显示的名字。
+   */
+  const registerAsset = (route: string, file: string, label: string): void => {
+    ctx.effect(
+      () =>
+        webServer.register({
+          kind: 'exact',
+          path: route,
+          handler: async (request: WebRequestLike, response: WebResponseLike) => {
+            const method = request.method
+            if (method !== undefined && method !== 'GET' && method !== 'HEAD') {
+              sendJson(response, 405, { ok: false, error: 'GET only' })
+              return
+            }
+            try {
+              const bytes = await readFile(file)
+              response.writeHead(200, {
+                'content-type': 'image/jpeg',
+                // 图不会变，缓存一天；真要换图就 bump 插件版本。
+                'cache-control': 'public, max-age=86400',
+                'content-length': String(bytes.length),
+              })
+              response.end(bytes)
+            } catch (error) {
+              // 缺素材时给一句可读的话（已脱敏）；前端各自有兜底，不会开天窗。
+              response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+              response.end(redactSecrets(`asset unavailable: ${safeErrorMessage(error)}`))
+            }
+          },
+        }),
+      `oss-backup: ${label}`,
+    )
+  }
+
+  registerAsset(SHOT_ROUTE, SHOT_FILE, '上传中那张图')
+  registerAsset(FAIL_ROUTE, FAIL_FILE, '游戏失败那张图')
 }
 
 /**

@@ -289,6 +289,9 @@ export const CREDENTIALS_PATH = `${API_BASE}/credentials`
  */
 export const SHOT_PATH = `${API_BASE}/asset/shot`
 
+/** 游戏失败时那张图的地址（宿主直吐包内素材）。 */
+export const FAIL_PATH = `${API_BASE}/asset/fail`
+
 /** 一次拉取的结果。 */
 export interface StateResult {
   /** 成功时的快照；失败为 null。 */

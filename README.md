@@ -7,14 +7,19 @@
 
 ## ⚠️ 安全须知（先读这一段）
 
-1. **不要用主账号密钥。** 请新建一个**只能读写指定桶**的子账号，只给它 `PutObject` 权限。
+1. **优先用密钥管理器把凭证注入环境变量。** 1Password CLI（`op run -- dsh web`）、
+   HashiCorp Vault、AWS Secrets Manager、Azure Key Vault、Doppler、direnv 都行 ——
+   插件只读 `process.env`，不关心值从哪来，所以**让密钥留在它该待的地方**，
+   远比复制粘贴到某个文件里安全。具体接法见 **[凭证接入指南](docs/credential-sources.md)**。
+2. **不要用主账号密钥。** 请新建一个**只能读写指定桶**的子账号，只给它 `PutObject` 权限。
    本文「[第 2 步](#第-2-步创建最小权限子账号必做)」有现成的配置可抄。
-2. **不要把密钥写进任何文件** —— 不要写进 README、issue、脚本、截图。本插件**不读 `.env`**，
-   只认操作系统的环境变量。
-3. **密钥一旦出现在聊天记录、日志或提交历史里，就当它已经泄漏** —— 立刻去服务商后台轮换掉。
-4. **本插件不会把你的密钥写到磁盘上。** 密钥只在内存里流转，界面永远只显示"已设置 / 未设置"，
-   日志里也只会出现变量**名**，不会出现变量值。
-5. 想确认这一点，可以在配好之后自己检查：`~/.dsh/oss-backup/config.json` 里
+3. **别把密钥写进会被提交的文件** —— README、issue、脚本、截图、Dockerfile 都算。
+   本插件**支持 `.env`**（启动时自动读、**只读不写**），但它只适合本地临时使用；
+   用之前**务必确认 `.env` 在 `.gitignore` 里**（本仓库已挡 `.env` / `.env.*` / `*.key` / `*.pem`）。
+4. **密钥一旦出现在聊天记录、日志或提交历史里，就当它已经泄漏** —— 立刻去服务商后台轮换掉。
+5. **本插件自己不会把密钥写到磁盘上。** 密钥只在内存里流转，界面永远只显示"已设置 / 未设置"，
+   日志里也只会出现变量**名**，不会出现变量值。（`.env` 是**你**写的、插件只读 —— 落不落盘由你决定。）
+6. 想确认这一点，可以在配好之后自己检查：`~/.dsh/oss-backup/config.json` 里
    **只会有开关、目录、桶名这类非机密信息，不会有任何密钥**。
 
 ---
@@ -167,16 +172,22 @@ mc admin policy attach <alias> dsh-backup-rw --user dsh-backup-bot
 
 挑你自己那一档，把值换成上面拿到的密钥。
 
+> **强烈建议优先用密钥管理器接入。** 下面的 `setx` 示例只是"最不依赖任何工具"的写法；
+> 更好的做法是让 1Password / Vault / AWS Secrets Manager 这类工具在启动 `dsh web` 时
+> 把凭证注入环境变量 —— 密钥就不用出现在 shell 历史、脚本或任何磁盘文件里。
+> **完整的接入清单（1Password / Bitwarden / Vault / AWS / Azure / Doppler / direnv /
+> Docker / systemd）见 [凭证接入指南](docs/credential-sources.md)。**
+
 **先说清一件事：值从哪来都行。** 插件只关心"这个键在你的进程环境里存不存在"，
 不关心它怎么来的。下面这些**完全等价**，用你顺手的那个：
 
 | 来源 | 怎么做 |
 | --- | --- |
+| **密钥管理器**（**推荐**） | `op run -- dsh web`（1Password）、`doppler run -- dsh web`、Vault / AWS Secrets Manager 等 —— 见[接入指南](docs/credential-sources.md) |
 | **系统环境变量** | Windows `setx`、macOS / Linux `export`（下面就是这一种） |
-| **`.env` 文件** | 复制 `.env.example` 改成 `.env`，放到 `<DSH home>/oss-backup/.env` 或当前工作目录 —— 插件启动时**自动读** |
+| **`.env` 文件** | 复制 `.env.example` 改成 `.env`，放到 `<DSH home>/oss-backup/.env` 或当前工作目录 —— 插件启动时**自动读**（只适合本地临时用，务必确认它被 gitignore） |
 | **Docker** | `docker run -e RUSTFS_ACCESS_KEY=...` |
 | **CI** | GitHub Actions Secrets / GitLab CI Variables 之类 |
-| **密码管理器** | 例如 1Password CLI：`op run -- dsh web`，它把 `op://...` 引用解析成环境变量再启动子进程 |
 
 **`.env` 的几条规则**（只读，插件**永不写入**）：
 
