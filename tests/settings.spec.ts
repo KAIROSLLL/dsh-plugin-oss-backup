@@ -53,7 +53,7 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ skipCaches: 'no' }).skipCaches).toBe(true)
   })
 
-  it('只认十个已知键，其余（含任何凭证字段）一律丢弃', () => {
+  it('只认已知键，其余（含任何凭证字段）一律丢弃', () => {
     const out = normalizeSettings({
       autoBackup: true,
       backupDir: '  D:/ws  ',
@@ -64,6 +64,7 @@ describe('normalizeSettings', () => {
       region: ' oss-cn-hangzhou ',
       gameEnabled: false,
       gameDifficulty: '  HARD  ',
+      schedule: { mode: 'daily', hour: 3, minute: 5 },
       // 下面这些是"如果有人往请求体里塞凭证"的情形，必须被丢掉。
       accessKey: ACCESS_KEY,
       accessKeyId: ACCESS_KEY,
@@ -84,6 +85,8 @@ describe('normalizeSettings', () => {
       region: 'oss-cn-hangzhou',
       gameEnabled: false,
       gameDifficulty: 'hard',
+      // 调度是嵌套对象：只保留白名单字段，其余补齐缺省。
+      schedule: { mode: 'daily', every: 1, unit: 'hour', hour: 3, minute: 5, dayOfMonth: 1 },
     })
     const serialized = JSON.stringify(out)
     expect(serialized).not.toContain(ACCESS_KEY)
@@ -118,6 +121,7 @@ describe('readSettings / writeSettings', () => {
       region: '',
       gameEnabled: true,
       gameDifficulty: 'easy',
+      schedule: { mode: 'off', every: 1, unit: 'hour', hour: 3, minute: 0, dayOfMonth: 1 },
     })
 
     const back = await readSettings(dir)
@@ -132,6 +136,7 @@ describe('readSettings / writeSettings', () => {
       region: '',
       gameEnabled: true,
       gameDifficulty: 'easy',
+      schedule: { mode: 'off', every: 1, unit: 'hour', hour: 3, minute: 0, dayOfMonth: 1 },
     })
   })
 

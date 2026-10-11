@@ -67,6 +67,8 @@ export interface StateSnapshot {
   settings: PluginSettingsView
   /** 凭证来源（**只有变量名，没有值**）。 */
   credentials: CredentialReport
+  /** 定期全量备份的运行态。 */
+  schedule: ScheduleReport
   /** 手动备份运行态（没跑过为 null）。 */
   manual: ManualReport | null
   /** 最近一次上传。 */
@@ -125,6 +127,34 @@ export interface PluginSettingsView {
   gameEnabled: boolean
   /** 小游戏难度（`zayu` / `easy` / `normal` / `hard`）。 */
   gameDifficulty: string
+  /** 定期全量备份的调度（与宿主同构）。 */
+  schedule: ScheduleView
+}
+
+/** 界面侧的调度视图。 */
+export interface ScheduleView {
+  /** 模式。 */
+  mode: 'off' | 'interval' | 'daily' | 'monthly'
+  /** `interval` 模式：间隔数值。 */
+  every: number
+  /** `interval` 模式：单位。 */
+  unit: 'minute' | 'hour' | 'day'
+  /** `daily` / `monthly` 模式：小时。 */
+  hour: number
+  /** `daily` / `monthly` 模式：分钟。 */
+  minute: number
+  /** `monthly` 模式：每月几号（1-28）。 */
+  dayOfMonth: number
+}
+
+/** 定期全量备份的运行态。 */
+export interface ScheduleReport {
+  /** 模式。 */
+  mode: string
+  /** 人话描述（如「每天 03:00」）。 */
+  description: string
+  /** 下次实际触发时刻；未排期为 null。 */
+  nextRunAt: number | null
 }
 
 /** 一次手动备份的汇总。 */
@@ -246,6 +276,7 @@ function toSnapshot(value: unknown): StateSnapshot | null {
       },
     },
     credentials: toCredentialReport(record.credentials),
+    schedule: toScheduleReport(record.schedule),
     last: toRecord(record.last),
     history: Array.isArray(record.history) ? record.history.map(toRecord).filter((item): item is UploadRecord => item !== null) : [],
   }
@@ -293,6 +324,46 @@ function toSettingsView(value: unknown): PluginSettingsView {
     // 缺省视为"开启"（与宿主默认一致）。
     gameEnabled: record.gameEnabled !== false,
     gameDifficulty: typeof record.gameDifficulty === 'string' ? record.gameDifficulty : 'easy',
+    schedule: toScheduleView(record.schedule),
+  }
+}
+
+/**
+ * 收窄调度设置。
+ *
+ * @param value - 未知值。
+ * @returns 调度视图；无效时给"关闭"。
+ */
+function toScheduleView(value: unknown): ScheduleView {
+  const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const mode =
+    record.mode === 'interval' || record.mode === 'daily' || record.mode === 'monthly' ? record.mode : 'off'
+  const unit = record.unit === 'minute' || record.unit === 'day' ? record.unit : 'hour'
+  const int = (input: unknown, fallback: number): number =>
+    typeof input === 'number' && Number.isFinite(input) ? Math.floor(input) : fallback
+  return {
+    mode,
+    every: Math.max(1, int(record.every, 1)),
+    unit,
+    hour: Math.min(23, Math.max(0, int(record.hour, 3))),
+    minute: Math.min(59, Math.max(0, int(record.minute, 0))),
+    dayOfMonth: Math.min(28, Math.max(1, int(record.dayOfMonth, 1))),
+  }
+}
+
+/**
+ * 收窄定期备份运行态。
+ *
+ * @param value - 未知值。
+ * @returns 运行态；无效时给"关闭"。
+ */
+function toScheduleReport(value: unknown): ScheduleReport {
+  const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    mode: typeof record.mode === 'string' ? record.mode : 'off',
+    description: typeof record.description === 'string' ? record.description : '关闭',
+    nextRunAt:
+      typeof record.nextRunAt === 'number' && Number.isFinite(record.nextRunAt) ? record.nextRunAt : null,
   }
 }
 

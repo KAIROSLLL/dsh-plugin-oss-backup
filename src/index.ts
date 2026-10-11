@@ -56,6 +56,7 @@ import {
   type ManualResult,
 } from './manual-backup.js'
 import { redactSecrets, safeErrorMessage } from './redact.js'
+import { describeSchedule, nextRunAt } from './schedule.js'
 import { DEFAULT_SETTINGS, dshHome, readSettings, writeSettings, type PluginSettings } from './settings.js'
 import { uploadFileToOss } from './upload.js'
 
@@ -468,6 +469,69 @@ export function apply(ctx: PluginContext): void {
 
   ctx.effect(() => () => autoBackup?.dispose(), 'oss-backup: 自动备份定时器清理')
 
+  /** 定期全量备份的定时器（`null` = 未排期 / 已关闭）。 */
+  let scheduleTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 下一次定期备份的**实际**触发时刻（供界面显示；未排期时为 `null`）。 */
+  let scheduleAt: number | null = null
+
+  /**
+   * 定时触发的那一次全量备份：跑完再排下一次。
+   *
+   * 与手动备份共用 {@link runManualJob} —— 同一套遍历、限额与记账逻辑，
+   * 只是触发源从"按钮"变成"时间表"。上一次还没跑完就跳过这一轮（不排队、不叠加）。
+   */
+  const runScheduledBackup = async (): Promise<void> => {
+    if (state.manual?.running === true) {
+      ctx.logger.warn('[oss-backup] 定期备份到点了，但上一次还在跑 —— 跳过这一轮')
+    } else {
+      await runManualJob(settings.backupDir)
+    }
+    // 无论这轮跑了还是跳了，都要接着排下一次。
+    applySchedule()
+  }
+
+  /**
+   * 按当前设置（重）排下一次定期全量备份。
+   *
+   * 刻意用"跑完再排下一次"的链式 `setTimeout`，而不是 `setInterval`：
+   * 备份本身可能跑好几分钟，`setInterval` 会让后续触发点漂移、甚至堆叠起多次备份。
+   */
+  const applySchedule = (): void => {
+    if (scheduleTimer !== null) {
+      clearTimeout(scheduleTimer)
+      scheduleTimer = null
+    }
+    scheduleAt = null
+    if (settings.schedule.mode === 'off') return
+    if (settings.backupDir === '') {
+      ctx.logger.warn('[oss-backup] 定期全量备份已开启，但还没设置备份目录 —— 暂不排期')
+      return
+    }
+
+    const at = nextRunAt(settings.schedule, Date.now())
+    if (at === null) return
+    // 兜底至少 1 秒，避免时钟回拨之类的极端情况下疯狂重排。
+    const delay = Math.max(1_000, at - Date.now())
+    scheduleAt = at
+    ctx.logger.info(
+      `[oss-backup] 定期全量备份：${describeSchedule(settings.schedule)}，下次约 ${new Date(at).toLocaleString()}`,
+    )
+    scheduleTimer = setTimeout(() => {
+      scheduleTimer = null
+      scheduleAt = null
+      void runScheduledBackup()
+    }, delay)
+  }
+
+  ctx.effect(
+    () => () => {
+      if (scheduleTimer !== null) clearTimeout(scheduleTimer)
+      scheduleTimer = null
+    },
+    'oss-backup: 定期备份定时器清理',
+  )
+
   // apply 是同步的，读设置是异步的：先读，读完再决定自动备份是否真的开跑。
   void readSettings().then(async (loaded) => {
     settings = loaded
@@ -486,6 +550,7 @@ export function apply(ctx: PluginContext): void {
     // ④ 最后尝试载入已加密保存的凭证（未开启持久化时这一步什么都不做）。
     await loadStoredCredentials()
     applyAutoBackup()
+    applySchedule()
 
     ctx.logger.info(
       `[oss-backup] 设置已加载：自动备份=${settings.autoBackup ? '开' : '关'}，前缀 ${settings.prefix}，备份目录 ${settings.backupDir === '' ? '(未设置)' : settings.backupDir}`,
@@ -563,6 +628,12 @@ export function apply(ctx: PluginContext): void {
               persistent: credentialStore !== null,
               /** 持久化后端说明；未启用为 null。 */
               storeLabel: credentialStore?.label ?? null,
+            },
+            // 定期全量备份：模式 / 人话描述 / 下次实际触发时刻（未排期为 null）。
+            schedule: {
+              mode: settings.schedule.mode,
+              description: describeSchedule(settings.schedule),
+              nextRunAt: scheduleAt,
             },
             last: state.last,
             history: state.history,
@@ -655,6 +726,8 @@ export function apply(ctx: PluginContext): void {
             settings = await writeSettings(body, dshHome())
             applySettingsToEnv()
             applyAutoBackup()
+            // 调度改了要重排 —— 否则改了时间还得等重启才生效。
+            applySchedule()
             ctx.logger.info(
               `[oss-backup] 设置已更新：自动备份=${settings.autoBackup ? '开' : '关'}，备份目录 ${settings.backupDir === '' ? '(未设置)' : settings.backupDir}`,
             )

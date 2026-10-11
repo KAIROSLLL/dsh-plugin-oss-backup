@@ -15,6 +15,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DEFAULT_BACKUP_PREFIX, normalizeBackupPrefix } from './auto-backup.js'
+import { DEFAULT_SCHEDULE, normalizeSchedule, type BackupSchedule } from './schedule.js'
 
 /**
  * 落盘设置的结构（**永远不含凭证**）。
@@ -53,6 +54,12 @@ export interface PluginSettings {
   readonly gameEnabled: boolean
   /** 小游戏难度（`zayu` / `easy` / `normal` / `hard`）。 */
   readonly gameDifficulty: string
+  /**
+   * 定期**全量**备份的调度（默认关闭）。
+   *
+   * 与"文件一改就传"的自动备份是两套东西：这条是按时间表把整个备份目录完整传一遍。
+   */
+  readonly schedule: BackupSchedule
 }
 
 /** 出厂设置。 */
@@ -67,6 +74,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   region: '',
   gameEnabled: true,
   gameDifficulty: 'easy',
+  schedule: DEFAULT_SCHEDULE,
 }
 
 /** 存放设置的目录名（挂在 DSH home 下）。 */
@@ -137,6 +145,9 @@ export function normalizeSettings(input: unknown, base: PluginSettings = DEFAULT
   const gameDifficulty =
     typeof record.gameDifficulty === 'string' ? record.gameDifficulty.trim().toLowerCase() : base.gameDifficulty
 
+  // 调度是一层嵌套对象，交给 schedule.ts 收窄（它自己会钳住越界的数字）。
+  const schedule = normalizeSchedule(record.schedule, base.schedule)
+
   return {
     autoBackup,
     backupDir,
@@ -148,6 +159,7 @@ export function normalizeSettings(input: unknown, base: PluginSettings = DEFAULT
     region,
     gameEnabled,
     gameDifficulty,
+    schedule,
   }
 }
 

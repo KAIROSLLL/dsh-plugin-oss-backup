@@ -44,8 +44,25 @@ import {
   type GameNote,
   type GameOutcome,
 } from './game'
+// describeSchedule 是纯函数（不碰 Node），直接复用宿主那一份 —— 免得两处描述逻辑各说各话。
+import { describeSchedule } from '../schedule.js'
 
 const { useCallback, useEffect, useRef, useState } = React
+
+/** 「定期全量备份」的模式按钮。 */
+const SCHEDULE_MODES = [
+  { id: 'off', label: '关闭' },
+  { id: 'interval', label: '按间隔' },
+  { id: 'daily', label: '每天' },
+  { id: 'monthly', label: '每月' },
+] as const
+
+/** 「按间隔」的单位按钮。 */
+const INTERVAL_UNITS = [
+  { id: 'minute', label: '分钟' },
+  { id: 'hour', label: '小时' },
+  { id: 'day', label: '天' },
+] as const
 
 /**
  * 空闲时的轮询间隔（毫秒）。
@@ -102,6 +119,8 @@ export const CSS = [
   '.ob-wrap .ob-switch.on > i{transform:translateX(18px)}',
   '.ob-wrap .ob-input{flex:1;min-width:180px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:5px 9px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}',
   '.ob-wrap .ob-input:focus{border-color:var(--dsw-alias-brand-primary)}',
+  // 数字输入（调度用）：固定窄宽度，别把整行撑开。
+  '.ob-wrap .ob-num{flex:0 0 auto;min-width:0;width:62px;text-align:center}',
   '.ob-wrap .ob-btn-primary{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);font-weight:600;padding:7px 20px}',
   '.ob-wrap .ob-btn-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover);border-color:var(--dsw-alias-button-primary-hover)}',
   '.ob-progress{height:6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}',
@@ -580,6 +599,8 @@ function ConsoleBlock(): React.ReactElement {
 function SettingsBlock(props: {
   settings: PluginSettingsView
   report: AutoBackupReport
+  /** 定期全量备份的下次**实际**触发时刻（宿主报的；未排期为 null）。 */
+  nextRunAt: number | null
   onSaved: () => void
 }): React.ReactElement {
   const [draft, setDraft] = useState<PluginSettingsView>(props.settings)
@@ -739,6 +760,152 @@ function SettingsBlock(props: {
           : '备份前玩一局《我们一起偷代码》：关 —— 点「立即备份」直接开始',
       ),
     ]),
+
+    // 定期全量备份：按时间表把整个备份目录完整传一遍（与"文件一改就传"是两套）
+    React.createElement('div', { className: 'ob-row', key: 'sched-mode' }, [
+      React.createElement('span', { className: 'ob-hint', key: 'k' }, '定期全量备份'),
+      ...(SCHEDULE_MODES.map((item) =>
+        React.createElement(
+          'button',
+          {
+            key: item.id,
+            type: 'button',
+            className: draft.schedule.mode === item.id ? 'ob-btn-primary' : undefined,
+            onClick: () =>
+              setDraft((current) => ({
+                ...current,
+                schedule: { ...current.schedule, mode: item.id },
+              })),
+          },
+          item.label,
+        ),
+      )),
+    ]),
+
+    // 按间隔：数值 + 单位
+    draft.schedule.mode === 'interval'
+      ? React.createElement('div', { className: 'ob-row', key: 'sched-interval' }, [
+          React.createElement('span', { className: 'ob-hint', key: 'k' }, '每'),
+          React.createElement('input', {
+            key: 'n',
+            type: 'number',
+            className: 'ob-input ob-num',
+            min: 1,
+            value: String(draft.schedule.every),
+            onChange: (event: { target: { value: string } }) =>
+              setDraft((current) => ({
+                ...current,
+                schedule: {
+                  ...current.schedule,
+                  every: Math.max(1, Math.floor(Number(event.target.value)) || 1),
+                },
+              })),
+          }),
+          ...(INTERVAL_UNITS.map((item) =>
+            React.createElement(
+              'button',
+              {
+                key: item.id,
+                type: 'button',
+                className: draft.schedule.unit === item.id ? 'ob-btn-primary' : undefined,
+                onClick: () =>
+                  setDraft((current) => ({
+                    ...current,
+                    schedule: { ...current.schedule, unit: item.id },
+                  })),
+              },
+              item.label,
+            ),
+          )),
+          React.createElement(
+            'span',
+            { className: 'ob-hint', key: 'tip' },
+            '从每次备份**跑完**开始计时（不是从排定时刻算）',
+          ),
+        ])
+      : null,
+
+    // 每天 / 每月：时刻（每月多一个"几号"）
+    draft.schedule.mode === 'daily' || draft.schedule.mode === 'monthly'
+      ? React.createElement('div', { className: 'ob-row', key: 'sched-clock' }, [
+          React.createElement(
+            'span',
+            { className: 'ob-hint', key: 'k' },
+            draft.schedule.mode === 'monthly' ? '每月' : '每天',
+          ),
+          draft.schedule.mode === 'monthly'
+            ? React.createElement('input', {
+                key: 'day',
+                type: 'number',
+                className: 'ob-input ob-num',
+                min: 1,
+                max: 28,
+                value: String(draft.schedule.dayOfMonth),
+                onChange: (event: { target: { value: string } }) =>
+                  setDraft((current) => ({
+                    ...current,
+                    schedule: {
+                      ...current.schedule,
+                      dayOfMonth: Math.min(28, Math.max(1, Math.floor(Number(event.target.value)) || 1)),
+                    },
+                  })),
+              })
+            : null,
+          draft.schedule.mode === 'monthly'
+            ? React.createElement('span', { className: 'ob-hint', key: 'd' }, '日')
+            : null,
+          React.createElement('input', {
+            key: 'h',
+            type: 'number',
+            className: 'ob-input ob-num',
+            min: 0,
+            max: 23,
+            value: String(draft.schedule.hour).padStart(2, '0'),
+            onChange: (event: { target: { value: string } }) =>
+              setDraft((current) => ({
+                ...current,
+                schedule: {
+                  ...current.schedule,
+                  hour: Math.min(23, Math.max(0, Math.floor(Number(event.target.value)) || 0)),
+                },
+              })),
+          }),
+          React.createElement('span', { className: 'ob-hint', key: 'c' }, ':'),
+          React.createElement('input', {
+            key: 'm',
+            type: 'number',
+            className: 'ob-input ob-num',
+            min: 0,
+            max: 59,
+            value: String(draft.schedule.minute).padStart(2, '0'),
+            onChange: (event: { target: { value: string } }) =>
+              setDraft((current) => ({
+                ...current,
+                schedule: {
+                  ...current.schedule,
+                  minute: Math.min(59, Math.max(0, Math.floor(Number(event.target.value)) || 0)),
+                },
+              })),
+          }),
+          draft.schedule.mode === 'monthly'
+            ? React.createElement(
+                'span',
+                { className: 'ob-hint', key: 'limit' },
+                '（只支持 1-28 号：每月都一定存在，不会遇到"2 月没有 30 号"）',
+              )
+            : null,
+        ])
+      : null,
+
+    React.createElement(
+      'div',
+      { className: 'ob-hint', key: 'sched-note' },
+      draft.schedule.mode === 'off'
+        ? '定期全量备份：关闭 —— 与「自动备份」独立，这里关掉不影响文件改动即时上传'
+        : `定期全量备份：${describeSchedule(draft.schedule)}${
+            dirty ? '（改完点保存生效）' : ''
+          }${props.nextRunAt === null ? ' · 已排期' : ` · 下次 ${new Date(props.nextRunAt).toLocaleString()}`}`,
+    ),
 
     // 保存 + 高级设置入口
     React.createElement('div', { className: 'ob-row', key: 'save-row' }, [
@@ -1510,6 +1677,7 @@ export function OssPanel(props: { variant?: 'settings' | 'panel' }): React.React
           key: 'settings',
           settings: snapshot.settings,
           report: snapshot.autoBackup,
+          nextRunAt: snapshot.schedule.nextRunAt,
           onSaved: () => {
             void refresh()
           },
