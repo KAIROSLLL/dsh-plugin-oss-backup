@@ -137,7 +137,9 @@ describe('AutoBackup 防抖', () => {
     expect(upload).toHaveBeenCalledTimes(1)
     expect(upload.mock.calls[0]?.[0]).toEqual({
       filePath: 'D:\\ws\\src\\index.ts',
-      objectKey: 'workspace-backup/index.ts',
+      // 对象键保留目录结构，且**跨平台一致**（以前 Windows 上会退化成只有文件名，
+      // 导致不同目录下的同名文件互相覆盖）。
+      objectKey: 'workspace-backup/ws/src/index.ts',
     })
 
     backup.dispose()
@@ -155,11 +157,11 @@ describe('AutoBackup 防抖', () => {
     // a 先到期。
     await vi.advanceTimersByTimeAsync(1100)
     expect(upload).toHaveBeenCalledTimes(1)
-    expect(upload.mock.calls[0]?.[0]?.objectKey).toBe('workspace-backup/a.ts')
+    expect(upload.mock.calls[0]?.[0]?.objectKey).toBe('workspace-backup/ws/a.ts')
 
     await vi.advanceTimersByTimeAsync(1000)
     expect(upload).toHaveBeenCalledTimes(2)
-    expect(upload.mock.calls[1]?.[0]?.objectKey).toBe('workspace-backup/b.ts')
+    expect(upload.mock.calls[1]?.[0]?.objectKey).toBe('workspace-backup/ws/b.ts')
 
     backup.dispose()
   })
@@ -259,7 +261,7 @@ describe('AutoBackup 重试与退避', () => {
 
     expect(upload).toHaveBeenCalledTimes(2)
     expect(warn).toHaveLength(1)
-    expect(info.join('\n')).toContain('自动备份完成：workspace-backup/a.ts')
+    expect(info.join('\n')).toContain('自动备份完成：workspace-backup/ws/a.ts')
 
     backup.dispose()
   })
@@ -323,6 +325,32 @@ describe('sanitizeObjectKeyTail（真机踩出来的 Windows 限制）', () => {
     expect(key).toBe('workspace-backup/projects/workspace/dsh-plugin-oss-backup/.probe.txt')
     expect(key).not.toContain(':')
 
+    backup.dispose()
+  })
+})
+
+describe('对象键必须跨平台一致（CI 在 Linux 上跑挂才暴露的 bug）', () => {
+  it('键尾对 Windows 反斜杠路径与 POSIX 正斜杠路径给出同一个结果', () => {
+    // 以前默认键尾用的是 node:path 的 basename —— 它在 Windows 上会把
+    // 'D:\ws\src\index.ts' 压成 'index.ts'（丢掉整段目录），在 Linux 上却原样返回。
+    expect(sanitizeObjectKeyTail('D:\\ws\\src\\index.ts')).toBe('ws/src/index.ts')
+    expect(sanitizeObjectKeyTail('D:/ws/src/index.ts')).toBe('ws/src/index.ts')
+    expect(sanitizeObjectKeyTail('/ws/src/index.ts')).toBe('ws/src/index.ts')
+  })
+
+  it('不同目录下的同名文件不会撞成同一个对象键（否则会互相覆盖）', async () => {
+    const { logger } = makeLogger()
+    const upload = vi.fn(async (input: { filePath: string; objectKey: string }) => okResult(input.objectKey))
+    const backup = new AutoBackup({ config: makeConfig(), logger, upload })
+
+    backup.schedule('D:\\a\\src\\x.ts')
+    backup.schedule('D:\\b\\src\\x.ts')
+    await vi.advanceTimersByTimeAsync(3000)
+
+    const keys = upload.mock.calls.map((call) => call[0]?.objectKey)
+    expect(keys).toHaveLength(2)
+    // 同一个键出现两次就意味着后传的覆盖了先传的 —— 数据丢失。
+    expect(new Set(keys).size).toBe(2)
     backup.dispose()
   })
 })
