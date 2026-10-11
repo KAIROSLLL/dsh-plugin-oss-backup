@@ -235,6 +235,8 @@ export interface ManualSummary {
   failed: number
   /** 因"内容没变、已经传过"而跳过的文件数。 */
   skippedUnchanged: number
+  /** 是否被用户**强行打断**。 */
+  aborted: boolean
   /** 成功字节数。 */
   bytes: number
   /** 是否因限额被截断。 */
@@ -259,6 +261,10 @@ export interface ManualReport {
   failed: number
   /** 当前文件。 */
   current: string
+  /** 因"没变化"跳过的数。 */
+  skipped: number
+  /** 是否还能强行打断（已经在收尾时为 false）。 */
+  cancellable: boolean
   /** 结束后的汇总（运行中为 null）。 */
   result: ManualSummary | null
 }
@@ -274,6 +280,9 @@ export const SETTINGS_PATH = `${API_BASE}/settings`
 
 /** 手动备份触发路径（`POST`）。 */
 export const RUN_PATH = `${API_BASE}/run`
+
+/** 强行打断正在跑的手动备份（`POST`）。 */
+export const CANCEL_PATH = `${API_BASE}/cancel`
 
 /**
  * 凭证注入路径（`POST`）。
@@ -488,6 +497,8 @@ function toManualReport(value: unknown): ManualReport | null {
     done: number(progress.done),
     failed: number(progress.failed),
     current: typeof progress.current === 'string' ? progress.current : '',
+    skipped: number(progress.skipped),
+    cancellable: record.cancellable === true,
     result:
       rawResult === null
         ? null
@@ -496,6 +507,7 @@ function toManualReport(value: unknown): ManualReport | null {
             uploaded: number(rawResult.uploaded),
             failed: number(rawResult.failed),
             skippedUnchanged: number(rawResult.skippedUnchanged),
+            aborted: rawResult.aborted === true,
             bytes: number(rawResult.bytes),
             truncated: rawResult.truncated === true,
             skippedFiles: number(rawResult.skippedFiles),
@@ -690,4 +702,17 @@ export function saveCredentials(
  */
 export function startManualBackup(timeoutMs = 8000): Promise<ActionResult> {
   return postJson(RUN_PATH, undefined, timeoutMs)
+}
+
+/**
+ * 强行打断正在跑的手动备份。
+ *
+ * 宿主收到后会把取消信号打上：循环在下一个文件边界停下，**正在传的那个文件**
+ * 也会被立刻掐断（分片上传的在途请求一并中止）。
+ *
+ * @param timeoutMs - 超时（毫秒）。
+ * @returns 结果。
+ */
+export function cancelManualBackup(timeoutMs = 8000): Promise<ActionResult> {
+  return postJson(CANCEL_PATH, undefined, timeoutMs)
 }

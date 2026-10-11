@@ -17,6 +17,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { basename, join, relative } from 'node:path'
 import { sanitizeObjectKeyTail } from './auto-backup.js'
 import { safeErrorMessage } from './redact.js'
+import { isAbortError } from './upload.js'
 import type { FileFingerprint, UploadIndex } from './upload-index.js'
 
 /** 遍历时整体跳过的目录名。 */
@@ -50,8 +51,12 @@ export interface CollectLimits {
  */
 export const DEFAULT_LIMITS: CollectLimits = {
   maxFiles: 2000,
-  maxFileBytes: 256 * 1024 * 1024,
-  maxTotalBytes: 2 * 1024 * 1024 * 1024,
+  // 5 GB —— S3 单次 PutObject 的上限。超过 8 MB 的文件本来就会走分片上传
+  // （协议允许到 5 TB），这里仍留一道防呆：免得误选了一个装满视频的目录。
+  maxFileBytes: 5 * 1024 * 1024 * 1024,
+  // 50 GB —— 同样只是防呆。以前卡在 2 GB 是因为"整个文件读进内存"，
+  // 分片上传之后内存占用恒定，这个数只用来拦住明显误选的场景。
+  maxTotalBytes: 50 * 1024 * 1024 * 1024,
 }
 
 /** 一次遍历的结果。 */
@@ -198,6 +203,8 @@ export interface ManualResult {
   readonly failed: number
   /** 因"内容没变、已经传过"而跳过的文件数。 */
   readonly skippedUnchanged: number
+  /** 是否被用户**强行打断**（中途停止，剩下的文件没处理）。 */
+  readonly aborted: boolean
   /** 成功的总字节数。 */
   readonly bytes: number
   /** 是否因限额被截断。 */
@@ -224,6 +231,15 @@ export interface ManualBackupDeps {
   readonly index?: UploadIndex
   /** 是否跳过没变化的文件；默认 = 是否提供了 {@link UploadIndex}。 */
   readonly skipUnchanged?: boolean
+  /**
+   * 每个文件**开始之前**问一次"还要继续吗"。
+   *
+   * 返回 `true` 就停下 —— 这就是「强行打断」的落点。放在文件边界而不是文件中间，
+   * 是为了让每一次中断都停在一个干净的位置：要么这个文件整个传完，要么完全没动。
+   * （传到一半的文件由 {@link ManualBackupDeps.upload} 内部的取消信号负责掐断，
+   * 那部分不会进桶，下次备份会重新传。）
+   */
+  readonly shouldAbort?: () => boolean
 }
 
 /** 结果里最多保留几条失败原因。 */
@@ -269,8 +285,14 @@ export async function runManualBackup(deps: ManualBackupDeps): Promise<ManualRes
   let failed = 0
   let skippedUnchanged = 0
   let bytes = 0
+  let aborted = false
 
   for (const [position, filePath] of plan.files.entries()) {
+    // 「强行打断」：在文件边界处停下，保证每次中断都停在一个干净的位置。
+    if (deps.shouldAbort?.() === true) {
+      aborted = true
+      break
+    }
     const tail = sanitizeObjectKeyTail(toKeyTail(plan.root, filePath))
     const objectKey = `${deps.prefix}${tail}`
     const fingerprint = plan.fingerprints.get(filePath)
@@ -291,6 +313,18 @@ export async function runManualBackup(deps: ManualBackupDeps): Promise<ManualRes
         // 只有真正传成功了才记账 —— 失败的文件下次还得再试。
         if (fingerprint !== undefined) index?.remember(objectKey, fingerprint)
       } catch (error) {
+        // 正在传的文件被掐断：不算失败，直接收工。
+        if (isAbortError(error)) {
+          aborted = true
+          deps.onProgress?.({
+            total: plan.files.length,
+            done: position,
+            failed,
+            skipped: skippedUnchanged,
+            current: tail,
+          })
+          break
+        }
         failed += 1
         if (errors.length < MAX_ERRORS) errors.push(safeErrorMessage(error))
       }
@@ -309,6 +343,7 @@ export async function runManualBackup(deps: ManualBackupDeps): Promise<ManualRes
     uploaded,
     failed,
     skippedUnchanged,
+    aborted,
     bytes,
     truncated: plan.truncated,
     skippedFiles: plan.skippedFiles,

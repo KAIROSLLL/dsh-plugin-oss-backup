@@ -22,6 +22,7 @@ import {
   FAIL_PATH,
   SHOT_PATH,
   startManualBackup,
+  cancelManualBackup,
   type AutoBackupReport,
   type PluginSettingsView,
   type StateSnapshot,
@@ -187,6 +188,9 @@ export const CSS = [
   '.ob-shot-wrap{display:flex;flex-direction:column;gap:4px;align-items:flex-start}',
   // 游戏失败那张图：圆角 + 轻阴影，别让它像贴上去的。
   '.ob-fail-shot{border-radius:12px;max-width:100%;box-shadow:0 2px 10px rgba(0,0,0,.18)}',
+  // 「强行打断」：危险动作用红色区分，免得跟「立即备份」混在一起点错。
+  '.ob-wrap button.ob-btn-danger{color:var(--dsw-alias-label-error,#d33);border-color:var(--dsw-alias-label-error,#d33)}',
+  '.ob-wrap button.ob-btn-danger:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-label-error,#d33) 10%,transparent)}',
 ].join('\n')
 
 /**
@@ -1471,6 +1475,7 @@ function ManualBlock(props: {
 }): React.ReactElement {
   const { snapshot } = props
   const [starting, setStarting] = useState(false)
+  const [canceling, setCanceling] = useState(false)
   const [note, setNote] = useState('')
   const manual = snapshot.manual
   const directory = snapshot.settings.backupDir
@@ -1535,6 +1540,31 @@ function ManualBlock(props: {
               : '立即备份',
       ),
       running && manual !== null ? React.createElement('span', { className: 'ob-hint', key: 'cur' }, `当前：${manual.current}`) : null,
+      // 强行打断：误选了大目录时不用干等，也不用重启 dsh web。
+      running && manual?.cancellable === true
+        ? React.createElement(
+            'button',
+            {
+              key: 'cancel',
+              type: 'button',
+              className: 'ob-btn-danger',
+              disabled: canceling,
+              title: '立刻停下：正在传的那个文件也会被掐断，已经传完的不受影响',
+              onClick: () => {
+                setCanceling(true)
+                void cancelManualBackup().then((result) => {
+                  setCanceling(false)
+                  setNote(result.ok ? '' : `打断失败：${result.error ?? '未知错误'}`)
+                  props.onChanged()
+                })
+              },
+            },
+            canceling ? '正在打断…' : '强行打断',
+          )
+        : null,
+      running && manual?.cancellable === false
+        ? React.createElement('span', { className: 'ob-warn', key: 'stopping' }, '正在停止…')
+        : null,
       blocked
         ? React.createElement(
             'span',

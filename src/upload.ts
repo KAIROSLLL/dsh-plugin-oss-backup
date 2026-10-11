@@ -34,6 +34,13 @@ export interface UploadInput {
   readonly filePath: string
   /** 目标对象键。 */
   readonly objectKey: string
+  /**
+   * 取消信号：中止后立即停止这次上传。
+   *
+   * 分片上传要传几 GB，用户点了「强行打断」时不该等它跑完 ——
+   * 所以这里一路透传给 SDK（`abortSignal`），由它中止在途请求并放弃后续分片。
+   */
+  readonly signal?: AbortSignal
 }
 
 /** 只用到 `send` 的最小 S3 客户端接口，便于测试替身。 */
@@ -42,9 +49,10 @@ export interface S3ClientLike {
    * 发送一条 S3 命令。
    *
    * @param command - SDK 命令实例。
+   * @param options - SDK 选项；我们只用到 `abortSignal` 做取消。
    * @returns SDK 响应。
    */
-  send(command: unknown): Promise<unknown>
+  send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>
 }
 
 /** 可注入的依赖（测试用；生产路径全部走默认实现）。 */
@@ -83,6 +91,30 @@ export const PART_SIZE_BYTES = 8 * 1024 * 1024
 
 /** 同时上传的分片数。峰值内存 ≈ 片大小 × 这个数。 */
 export const PART_CONCURRENCY = 4
+
+/**
+ * 造一个"操作被取消"的错误。
+ *
+ * 单独区分出来是因为它**不是失败** —— 批量备份撞上它应当安静地停下并如实报"已中止"，
+ * 而不是往失败列表里塞一条吓人的红字。
+ *
+ * @returns 带 `name: 'AbortError'` 的错误。
+ */
+export function abortError(): Error {
+  const error = new Error('操作已被用户中止')
+  error.name = 'AbortError'
+  return error
+}
+
+/**
+ * 判断一个错误是不是"被取消"。
+ *
+ * @param error - 捕获到的错误。
+ * @returns 是取消时为 `true`。
+ */
+export function isAbortError(error: unknown): boolean {
+  return (error as { name?: string } | null)?.name === 'AbortError'
+}
 
 /**
  * 按配置构造 S3 客户端。
@@ -134,6 +166,8 @@ export async function uploadFileToOss(input: UploadInput, deps: UploadDeps = {})
   const createClient = deps.createClient ?? createS3Client
   const client = createClient(config)
   const params = { Bucket: config.bucket, Key: input.objectKey }
+  // 取消信号一路上传：用户点「强行打断」时，在途的分片要立刻停。
+  const abortSignal = input.signal === undefined ? {} : { abortSignal: input.signal }
 
   // 小文件要整份读进内存。**读失败与上传失败要分开报**，所以读放在下面 try 之外。
   let body: Uint8Array | null = null
@@ -142,6 +176,8 @@ export async function uploadFileToOss(input: UploadInput, deps: UploadDeps = {})
     try {
       body = await read(input.filePath)
     } catch (error) {
+      // 被取消时读文件也可能抛，别把它报成"读不了文件"。
+      if (input.signal?.aborted === true) throw abortError()
       throw new Error(`无法读取本地文件 ${input.filePath}：${safeErrorMessage(error)}`)
     }
   }
@@ -150,6 +186,7 @@ export async function uploadFileToOss(input: UploadInput, deps: UploadDeps = {})
     if (body !== null) {
       await client.send(
         new PutObjectCommand({ ...params, Body: body, ContentLength: body.byteLength }),
+        abortSignal,
       )
     } else {
       // 大文件：分片并行。**不把整个文件读进内存** —— 峰值内存约
@@ -166,6 +203,7 @@ export async function uploadFileToOss(input: UploadInput, deps: UploadDeps = {})
       await upload.done()
     }
   } catch (error) {
+    if (input.signal?.aborted === true) throw abortError()
     throw new Error(
       `上传到对象存储失败（bucket=${config.bucket}，key=${input.objectKey}）：${safeErrorMessage(error)}`,
     )

@@ -352,4 +352,64 @@ describe('runManualBackup', () => {
       expect(skipped).toEqual([1, 2])
     })
   })
+
+  describe('强行打断', () => {
+    it('shouldAbort 一旦为真就在文件边界停下，并标记 aborted', async () => {
+      const upload = vi.fn(async () => ({ bytes: 10 }))
+      let asked = 0
+
+      const result = await runManualBackup({
+        plan,
+        prefix: 'bk/',
+        upload,
+        // 第一次问"还要继续吗"放过，第二次叫停 —— 于是只传了第一个文件。
+        shouldAbort: () => {
+          asked += 1
+          return asked > 1
+        },
+      })
+
+      expect(result.aborted).toBe(true)
+      expect(upload).toHaveBeenCalledTimes(1)
+      expect(result.uploaded).toBe(1)
+      // 中止不是失败：不该往失败列表里塞东西。
+      expect(result.failed).toBe(0)
+      expect(result.errors).toEqual([])
+    })
+
+    it('正在传的文件被掐断（AbortError）时同样不算失败', async () => {
+      const upload = vi.fn(async () => {
+        const error = new Error('操作已被用户中止')
+        error.name = 'AbortError'
+        throw error
+      })
+
+      const result = await runManualBackup({ plan, prefix: 'bk/', upload })
+
+      expect(result.aborted).toBe(true)
+      expect(result.failed).toBe(0)
+      expect(result.errors).toEqual([])
+      expect(result.uploaded).toBe(0)
+    })
+
+    it('没被打断时 aborted 为 false，全部传完', async () => {
+      const upload = vi.fn(async () => ({ bytes: 10 }))
+      const result = await runManualBackup({ plan, prefix: 'bk/', upload, shouldAbort: () => false })
+
+      expect(result.aborted).toBe(false)
+      expect(result.uploaded).toBe(2)
+    })
+
+    it('**上传失败的文件不记账** —— 缺了 abort 与普通错误的区分就查不出这类问题', async () => {
+      // 普通错误仍然照常记账为失败（别把 abort 的特殊处理扩大化）。
+      const upload = vi.fn(async () => {
+        throw new Error('连接超时')
+      })
+      const result = await runManualBackup({ plan, prefix: 'bk/', upload })
+      expect(result.aborted).toBe(false)
+      expect(result.failed).toBe(2)
+      // 两个文件各记一条（MAX_ERRORS 之内都会留下）。
+      expect(result.errors).toHaveLength(2)
+    })
+  })
 })

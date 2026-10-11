@@ -96,6 +96,9 @@ export const SETTINGS_ROUTE = '/oss-backup/settings'
 /** 触发一次手动备份的路由：`POST`，异步执行，进度靠 `/state` 轮询。 */
 export const RUN_ROUTE = '/oss-backup/run'
 
+/** 强行打断正在跑的手动备份：`POST`。 */
+export const CANCEL_ROUTE = '/oss-backup/cancel'
+
 /**
  * 从设置页注入凭证的路由：`POST`。
  *
@@ -194,6 +197,13 @@ export interface ManualRunState {
   readonly progress: ManualProgress
   /** 结束后的汇总（运行中为 null）。 */
   readonly result: ManualResult | null
+  /**
+   * 用于「强行打断」的控制器（不在跑时为 null）。
+   *
+   * 它同时承担两件事：让循环在**文件边界**停下（`signal.aborted`），
+   * 以及掐断**正在传的那个文件**（信号透传给 SDK 的在途请求）。
+   */
+  readonly abort: AbortController | null
 }
 
 /**
@@ -811,6 +821,9 @@ export function apply(ctx: PluginContext): void {
                     root: state.manual.root,
                     progress: state.manual.progress,
                     result: state.manual.result,
+                    /** 是否还能打断（已经按下过就不必再显示按钮）。 */
+                    cancellable:
+                      state.manual.running && state.manual.abort?.signal.aborted !== true,
                   },
             environment: {
               ...describeOssEnvironment(),
@@ -885,19 +898,23 @@ export function apply(ctx: PluginContext): void {
       const result = await runManualBackup({
         plan,
         prefix: settings.prefix,
-        upload: (input) => uploadFileToOss(input),
+        upload: (input) =>
+          // 把取消信号透传下去：用户点「强行打断」时，正在传的那个文件要立刻停。
+          uploadFileToOss({ ...input, signal: state.manual?.abort?.signal }),
         // 查重：内容没变、已经传过的文件直接跳过。批量备份每次都会把整个目录走一遍，
         // 不查重的话几千个没动过的文件会被一遍遍重传。
         index: uploadIndex,
+        // 「强行打断」：每传完一个文件问一次；正在传的那个由信号掐断。
+        shouldAbort: () => state.manual?.abort?.signal.aborted === true,
         onProgress: (progress) => {
           if (state.manual !== null) state.manual = { ...state.manual, progress }
         },
       })
       // 传完把索引落盘；写失败不影响这次备份的结果，下次重传一轮而已。
       await persistUploadIndex()
-      if (state.manual !== null) state.manual = { ...state.manual, running: false, result }
+      if (state.manual !== null) state.manual = { ...state.manual, running: false, result, abort: null }
       ctx.logger.info(
-        `[oss-backup] 手动备份结束：成功 ${result.uploaded} / 失败 ${result.failed}，共 ${result.bytes} 字节${result.truncated ? '（触到文件数上限）' : ''}`,
+        `[oss-backup] 手动备份${result.aborted ? '被中止' : '结束'}：成功 ${result.uploaded} / 失败 ${result.failed}，共 ${result.bytes} 字节${result.truncated ? '（触到文件数上限）' : ''}`,
       )
       // 失败原因在 manual-backup 里已经脱敏。
       for (const message of result.errors) ctx.logger.warn(`[oss-backup] 手动备份失败项：${message}`)
@@ -912,11 +929,13 @@ export function apply(ctx: PluginContext): void {
             uploaded: 0,
             failed: 0,
             skippedUnchanged: 0,
+            aborted: false,
             bytes: 0,
             truncated: false,
             skippedFiles: 0,
             errors: [reason],
           },
+          abort: null,
         }
       }
       ctx.logger.warn(`[oss-backup] 手动备份中断：${reason}`)
@@ -1065,12 +1084,38 @@ export function apply(ctx: PluginContext): void {
             root,
             progress: { total: 0, done: 0, failed: 0, skipped: 0, current: '' },
             result: null,
+            // 每次备份一个新控制器：上一次的取消状态不会漏到这一次。
+            abort: new AbortController(),
           }
           sendJson(response, 200, { ok: true, started: true, root })
           void runManualJob(root)
         },
       }),
     'oss-backup: 手动备份路由',
+  )
+
+  // 强行打断：把当前这次备份的取消信号打上 —— 循环会在下一个文件边界停下，
+  // 正在传的那个文件的在途请求也会被 SDK 立刻掐断。
+  ctx.effect(
+    () =>
+      webServer.register({
+        kind: 'exact',
+        path: CANCEL_ROUTE,
+        handler: (request: WebRequestLike, response: WebResponseLike) => {
+          if (request.method !== undefined && request.method !== 'POST') {
+            sendJson(response, 405, { ok: false, error: 'POST only' })
+            return
+          }
+          if (state.manual?.running !== true) {
+            sendJson(response, 409, { ok: false, error: '当前没有正在跑的备份' })
+            return
+          }
+          state.manual.abort?.abort()
+          ctx.logger.info('[oss-backup] 收到强行打断请求，正在停止手动备份')
+          sendJson(response, 200, { ok: true, canceling: true })
+        },
+      }),
+    'oss-backup: 强行打断路由',
   )
 
   /**
