@@ -1,0 +1,29 @@
+# 依赖与构建产物
+node_modules/
+lib/
+*.tsbuildinfo
+coverage/
+
+# 本地包管理器状态（避免污染用户全局缓存）
+.pnpm-store/
+.npm-cache/
+
+# 密钥红线：环境变量文件绝不允许进版本库。
+# 本插件运行时只从进程环境变量读取 AK/SK，不读 .env；
+# 保留这些规则是为了防止使用者用其它工具（dotenv 等）本地存放凭证时误提交。
+.env
+.env.*
+!.env.example
+
+# 常见密钥 / 证书文件形态（Gitleaks 之外的第二道闸）
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials.json
+*.credentials
+
+# 本插件可选的加密凭证文件（明文永远不落盘；密文同样别提交）
+credentials.enc

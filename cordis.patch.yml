@@ -1,0 +1,16 @@
+# dsh-plugin-oss-backup bundle patch.
+#
+# 标准 DSH bundle 插件，两种安装方式：
+#     dsh plugin --profile <profile> add dsh-plugin-oss-backup          # 从 npm
+#     dsh plugin --profile <profile> add "link:<本目录绝对路径>"          # 本地开发
+#
+# ⚠️ 宿主侧（lib/index.js）改动必须重启 dsh web 才生效（模块进了 ESM 缓存）；
+#    客户端侧（lib/client.js）由 dsh-client-hmr 热重载。
+#
+# ⚠️ 客户端半边 window.__ModuleLoader__.load({ id }) 里写的必须是**包名**
+#    （dsh-plugin-oss-backup）：client-modules 用「最近的 package.json」判定浏览器模块 id，
+#    写别的名字会报 "loaded without registering <包名>" 并让这一半静默失效。
+#    下面的 entry id 与包名保持一致，纯粹是为了少一个需要对照的名字。
+- insert:
+    - id: dsh-plugin-oss-backup
+      name: dsh-plugin-oss-backup

@@ -1,0 +1,83 @@
+{
+  "name": "dsh-plugin-oss-backup",
+  "version": "0.13.3",
+  "description": "DeepSeek Harness 插件：把工作区文件备份到 S3 兼容对象存储（RustFS / 阿里云 OSS / AWS S3）。AK/SK 只从环境变量读取，绝不落盘、绝不进日志。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "oss",
+    "s3",
+    "backup",
+    "rustfs",
+    "client-s3"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "assets",
+    "src",
+    "scripts",
+    "tests",
+    "cordis.patch.yml",
+    "README.md",
+    ".env.example"
+  ],
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1149.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.3"
+  },
+  "scripts": {
+    "build": "pnpm run build:host && pnpm run build:client",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "node scripts/build-client.mjs",
+    "typecheck:client": "tsc -p tsconfig.client.json",
+    "test": "vitest run",
+    "check:secrets": "node scripts/secret-scan.mjs",
+    "check:load": "node --import ./scripts/register-stub.mjs scripts/load-check.mjs",
+    "verify:live": "node scripts/live-upload.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "dsh-plugin-oss-backup contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KAIROSLLL/dsh-plugin-oss-backup.git"
+  },
+  "homepage": "https://github.com/KAIROSLLL/dsh-plugin-oss-backup#readme",
+  "bugs": {
+    "url": "https://github.com/KAIROSLLL/dsh-plugin-oss-backup/issues"
+  }
+}

@@ -1,0 +1,25 @@
+# Gitleaks 配置：在默认规则之上，放行"公开的文档示例值"。
+#
+# 为什么需要 allowlist：本仓库的测试与 README 里用了 AWS 官方文档的经典示例
+#   AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+# —— 它们是**公开的假值**，形态却与真密钥完全一致，默认规则会命中。
+#
+# 放行的是这两个**精确串**，不是整个 AWS 规则：任何别的 AK/ SK 照样会被拦下。
+[extend]
+useDefault = true
+
+[allowlist]
+description = "公开示例值、依赖目录与构建产物"
+paths = [
+  '''pnpm-lock\.yaml''',
+  '''^lib/''',
+  '''\.map$''',
+  # 本地 `--no-git` 扫描时会连依赖目录一起走；CI 用 git 模式本来就看不到它们。
+  '''node_modules/''',
+  '''\.pnpm-store/''',
+  '''\.npm-cache/''',
+]
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY''',
+]

@@ -1,0 +1,12 @@
+# pnpm 11 起，原先写在 package.json `pnpm` 字段里的设置搬到了这里
+# （写回 package.json 只会得到 "no longer read by pnpm" 的警告）。
+#
+# esbuild 需要在安装时跑一次 postinstall 落地平台二进制；pnpm 默认拦截所有构建脚本，
+# 不在这里显式批准的话 `pnpm run build:client` 会因为缺二进制而失败。
+onlyBuiltDependencies:
+  - esbuild
+
+# `pnpm run` 默认会先跑一次依赖校验（等于一次 install），每次多花几秒，
+# 而且会被 esbuild 的 postinstall 拦截规则打断（ERR_PNPM_IGNORED_BUILDS）。
+# 依赖由我们显式 `pnpm install`，跑脚本时不必再校验。
+verifyDepsBeforeRun: false
