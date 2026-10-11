@@ -15,7 +15,6 @@
  * @module dsh-plugin-oss-backup/auto-backup
  */
 
-import { basename } from 'node:path'
 import { safeErrorMessage } from './redact.js'
 import { uploadFileToOss, type UploadResult } from './upload.js'
 
@@ -185,7 +184,15 @@ export class AutoBackup {
     this.config = deps.config
     this.logger = deps.logger
     this.upload = deps.upload ?? ((input) => uploadFileToOss(input))
-    this.toKeyTail = deps.toKeyTail ?? ((filePath) => basename(filePath))
+    // 默认键尾 = **完整路径**：交给 sanitizeObjectKeyTail 剥盘符、统一斜杠，
+    // 这样能保留目录结构，与手动备份的规则一致。
+    //
+    // ⚠️ 这里绝不能用 path.basename：它在不同平台上对同一输入给出**不同结果** ——
+    //   · Windows：'D:\ws\src\index.ts' → 'index.ts'，**整个目录结构丢了**，
+    //     于是 D:/a/src/x.ts 与 D:/b/src/x.ts 会撞成同一个对象键、**互相覆盖**（数据丢失）；
+    //   · Linux：反斜杠不是分隔符，basename 反而原样返回、结构得以保留。
+    // 这个跨平台不一致是 CI（Linux）把一个在 Windows 上通过的测试跑挂之后才暴露出来的。
+    this.toKeyTail = deps.toKeyTail ?? ((filePath) => filePath)
     this.onStart = deps.onStart
     this.onResult = deps.onResult
   }
