@@ -904,8 +904,6 @@ export function apply(ctx: PluginContext): void {
         // 查重：内容没变、已经传过的文件直接跳过。批量备份每次都会把整个目录走一遍，
         // 不查重的话几千个没动过的文件会被一遍遍重传。
         index: uploadIndex,
-        // 「强行打断」：每传完一个文件问一次；正在传的那个由信号掐断。
-        shouldAbort: () => state.manual?.abort?.signal.aborted === true,
         onProgress: (progress) => {
           if (state.manual !== null) state.manual = { ...state.manual, progress }
         },

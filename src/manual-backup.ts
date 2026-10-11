@@ -231,15 +231,6 @@ export interface ManualBackupDeps {
   readonly index?: UploadIndex
   /** 是否跳过没变化的文件；默认 = 是否提供了 {@link UploadIndex}。 */
   readonly skipUnchanged?: boolean
-  /**
-   * 每个文件**开始之前**问一次"还要继续吗"。
-   *
-   * 返回 `true` 就停下 —— 这就是「强行打断」的落点。放在文件边界而不是文件中间，
-   * 是为了让每一次中断都停在一个干净的位置：要么这个文件整个传完，要么完全没动。
-   * （传到一半的文件由 {@link ManualBackupDeps.upload} 内部的取消信号负责掐断，
-   * 那部分不会进桶，下次备份会重新传。）
-   */
-  readonly shouldAbort?: () => boolean
 }
 
 /** 结果里最多保留几条失败原因。 */
@@ -271,6 +262,11 @@ function defaultKeyTail(root: string, filePath: string): string {
  * 和 {@link ManualBackupDeps.index} 里记的一比就知道传过没传过 ——
  * 批量备份每次都会把整个目录走一遍，不查重的话几千个没动过的文件会被一遍遍重传。
  *
+ * **中止完全由「强行打断」按钮驱动**：按钮把上传的 `AbortSignal` 打上，
+ * 正在传的那个文件立刻被 SDK 掐断（分片上传的在途请求一并中止），
+ * 循环收到 `AbortError` 就收工。这里**不做任何轮询式检查** ——
+ * 上传过程是连贯的一条流，不该被额外的询问打断。
+ *
  * @param deps - 计划、前缀、上传实现、可选索引。
  * @returns 汇总结果。
  */
@@ -288,11 +284,6 @@ export async function runManualBackup(deps: ManualBackupDeps): Promise<ManualRes
   let aborted = false
 
   for (const [position, filePath] of plan.files.entries()) {
-    // 「强行打断」：在文件边界处停下，保证每次中断都停在一个干净的位置。
-    if (deps.shouldAbort?.() === true) {
-      aborted = true
-      break
-    }
     const tail = sanitizeObjectKeyTail(toKeyTail(plan.root, filePath))
     const objectKey = `${deps.prefix}${tail}`
     const fingerprint = plan.fingerprints.get(filePath)
