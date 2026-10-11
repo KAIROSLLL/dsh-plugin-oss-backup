@@ -170,3 +170,25 @@ describe('dshHome', () => {
     expect(dshHome({ DSH_HOME: '   ' })).toMatch(/\.dsh$/)
   })
 })
+
+describe('防回归：/state 必须报出完整设置（"小游戏开关关不掉"的根因）', () => {
+  it('宿主是整体展开 settings，而不是手写字段白名单', async () => {
+    // 背景：/state 原本是 `settings: { autoBackup, backupDir, prefix }` 三个字段的手写白名单。
+    // 后来新增的设置项（skipCaches / provider / endpoint / bucket / region /
+    // gameEnabled / gameDifficulty）都没往里补，于是：
+    //   · 保存完全正常（确实写进了 config.json）
+    //   · 但界面读回来永远是默认值 —— 关掉「备份前的小游戏」根本没有效果
+    // 整体展开从结构上免疫这个问题（settings 本身已由 normalizeSettings 做过白名单）。
+    const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).toContain('settings: { ...settings }')
+    // 反向断言：不要出现逐字段抄写 autoBackup 的白名单写法。
+    expect(source).not.toMatch(/settings:\s*\{\s*\n\s*autoBackup:\s*settings\.autoBackup/)
+  })
+
+  it('客户端对缺失字段的兜底不能让开关"锁死"在开的状态', () => {
+    // 即便宿主漏报字段，界面也不该把它当成 false 才关 —— 这条锁定当前语义，
+    // 万一以后改成 `=== true` 会让老配置全部失效，那时候必须有意识地改这里。
+    expect(normalizeSettings({}).gameEnabled).toBe(true)
+    expect(normalizeSettings({ gameEnabled: false }).gameEnabled).toBe(false)
+  })
+})

@@ -590,11 +590,16 @@ export function apply(ctx: PluginContext): void {
             // busy 结束后还留一个最短可见窗口，界面必定采得到（见 BUSY_VISIBLE_MS）。
             busy: state.busy || Date.now() < state.busyUntil,
             // 设置：界面可改，且**不含任何凭证**。
-            settings: {
-              autoBackup: settings.autoBackup,
-              backupDir: settings.backupDir,
-              prefix: settings.prefix,
-            },
+            //
+            // ⚠️ 这里**整体展开**，绝不要手写字段白名单 —— 原本写的是
+            // `{ autoBackup, backupDir, prefix }` 三个字段，之后加的 skipCaches /
+            // provider / endpoint / bucket / region / gameEnabled / gameDifficulty 全没跟上：
+            // 保存是好的（确实写进了 config.json），但界面读回来永远是默认值，
+            // 表现就是"小游戏的开关关不掉"、"跳过缓存关不了"。
+            //
+            // 安全性不受影响：settings 是 normalizeSettings() 的产物，
+            // 它只回填那组已知字段，任何凭证字段在入口处就被丢弃了。
+            settings: { ...settings },
             // 自动备份运行态：界面据此显示开关效果与排队数。
             autoBackup: {
               enabled: settings.autoBackup,
