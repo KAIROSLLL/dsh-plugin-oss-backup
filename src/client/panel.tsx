@@ -605,11 +605,6 @@ function ConsoleBlock(): React.ReactElement {
         CONSOLE_URL,
       ),
     ]),
-    React.createElement(
-      'div',
-      { className: 'ob-hint', key: 'desc' },
-      '打开 RustFS 控制台，在网页里查看桶内容、下载或核对刚上传的对象。',
-    ),
     note === '' ? null : React.createElement('div', { className: 'ob-warn', key: 'note' }, note),
   ])
 }
@@ -821,9 +816,8 @@ function SettingsBlock(props: {
       React.createElement(
         'span',
         { className: 'ob-hint', key: 'label' },
-        draft.gameEnabled
-          ? '备份前玩一局《我们一起偷代码》：点「立即备份」会先来一局，通关才真的开始备份'
-          : '备份前玩一局《我们一起偷代码》：关 —— 点「立即备份」直接开始',
+        // 玩法说明写在 README 里；界面上只留"开 / 关"。
+        draft.gameEnabled ? '备份前的小游戏：开' : '备份前的小游戏：关',
       ),
     ]),
 
@@ -1071,12 +1065,6 @@ function SettingsBlock(props: {
           ]),
         ]
       : null,
-
-    React.createElement(
-      'div',
-      { className: 'ob-hint', key: 'foot' },
-      '非机密项存在 ~/.dsh/oss-backup/config.json；AK/SK 不在这个文件里 —— 见下面的「凭证」块。',
-    ),
   ])
 }
 
@@ -1435,14 +1423,6 @@ function CredentialBlock(props: { snapshot: StateSnapshot; onChanged: () => void
       ),
       note === '' ? null : React.createElement('span', { className: 'ob-warn', key: 'note' }, note),
     ]),
-
-    React.createElement(
-      'div',
-      { className: 'ob-hint', key: 'tip' },
-      '值只会被写进宿主进程的环境变量：不回显、不进日志。默认不落盘（重启 dsh web 后要重填）；' +
-        '开启持久化后才会以密文保存，且绑定当前系统账户。' +
-        '最省事的其实还是 setx 设系统环境变量 —— 插件每次启动会自动补读它，一次配置永久有效，什么都不用填。',
-    ),
   ])
 }
 
@@ -1623,11 +1603,7 @@ function EnvironmentBlock(props: { snapshot: StateSnapshot }): React.ReactElemen
       : null,
     React.createElement('div', { className: 'ob-grid', key: 'grid' }, rows),
     env.ready
-      ? React.createElement(
-          'div',
-          { className: 'ob-hint', key: 'hint' },
-          '凭证只存在于宿主进程内存中：本页只能看到「是否已设置」，看不到值，也不提供任何输入框。',
-        )
+      ? null
       : React.createElement(
           'div',
           { className: 'ob-code', key: 'missing' },
