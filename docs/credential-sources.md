@@ -15,7 +15,6 @@
 
 只要满足这一条，**用什么都行** —— 插件不需要、也不应该知道你的密钥从哪来。
 
-> 这正是"`process.env` 只关心键在不在，不关心值从哪来"的含义。
 > 手动 `export`、`.env`、Docker `-e`、CI Secret、1Password / Vault / AWS Secrets Manager……
 > 对插件而言完全等价。
 
