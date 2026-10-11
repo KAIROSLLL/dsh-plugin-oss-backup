@@ -9,7 +9,10 @@
  *
  * 这里只负责"算出下一次该在什么时候跑"；真正的定时器在 `index.ts` 里，
  * 用的是"跑完再排下一次"的链式 `setTimeout`（而不是 `setInterval`），
- * 这样一次备份跑多久都不会让后续排期漂移或堆叠。
+ * 这样不会堆叠出多次备份。
+ *
+ * `interval` 模式算的是**排定时刻**（固定节拍）：每 30 分钟就是 :00 与 :30，
+ * 每 6 小时就是 00/06/12/18 —— 一次备份跑多久都不会把后续时间点往后推。
  *
  * @module dsh-plugin-oss-backup/schedule
  */
@@ -119,8 +122,11 @@ export function normalizeSchedule(
  * 算出"从 `from` 时刻起，下一次该备份的时刻"。
  *
  * @param schedule - 调度设置。
- * @param from - 起点（毫秒时间戳，通常是"上一次跑完"的时刻）。
+ * @param from - 起点（毫秒时间戳）。
  * @returns 下次触发时刻；`off` 或参数非法时返回 `null`。
+ *
+ * `interval` 模式对齐到**排定时刻**（固定节拍），而不是"从 `from` 往后加一段"：
+ * 一次备份跑多久都不会把后续时间点往后推。
  */
 export function nextRunAt(schedule: BackupSchedule, from: number): number | null {
   if (schedule.mode === 'off') return null
@@ -129,7 +135,22 @@ export function nextRunAt(schedule: BackupSchedule, from: number): number | null
   if (schedule.mode === 'interval') {
     const every = Math.max(1, Math.floor(schedule.every))
     const step = every * UNIT_MS[schedule.unit]
-    return from + step
+
+    if (schedule.unit === 'day') {
+      // 「每 N 天」对齐到**当地零点**的固定节拍：按"绝对天数 % N"取余，
+      // 这样今天是哪天都不影响节拍（否则会今天算后天、后天再算大后天，一路漂下去）。
+      const midnight = new Date(from)
+      midnight.setHours(0, 0, 0, 0)
+      const dayIndex = Math.floor(midnight.getTime() / UNIT_MS.day)
+      const remainder = ((dayIndex % every) + every) % every
+      const addDays = remainder === 0 ? every : every - remainder
+      midnight.setDate(midnight.getDate() + addDays)
+      return midnight.getTime()
+    }
+
+    // 分钟 / 小时：按**绝对时间**取模对齐到排定时刻 —— 每 30 分钟就是 :00 和 :30，
+    // 每 6 小时就是 00/06/12/18。固定节拍，与时区无关。
+    return Math.floor(from / step) * step + step
   }
 
   if (schedule.mode === 'daily') {

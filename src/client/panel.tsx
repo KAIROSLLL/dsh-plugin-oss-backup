@@ -611,16 +611,28 @@ function SettingsBlock(props: {
   const [advanced, setAdvanced] = useState(false)
 
   // 只有宿主那边的**值**真的变了才同步草稿（同值轮询不该打断输入）。
-  const hostKey = `${props.settings.autoBackup}|${props.settings.backupDir}|${props.settings.prefix}`
+  //
+  // ⚠️ key 必须覆盖**全部**设置项。原来手写了前三个字段，新增 schedule 之后就跟不上了。
+  // 直接用序列化结果当 key，天然免疫"再加字段忘了补"。
+  const hostKey = JSON.stringify(props.settings)
   useEffect(() => {
     setDraft(props.settings)
     setBaseline(props.settings)
   }, [hostKey])
 
-  const dirty =
-    draft.autoBackup !== baseline.autoBackup ||
-    draft.backupDir !== baseline.backupDir ||
-    draft.prefix !== baseline.prefix
+  /**
+   * 草稿与基准是否不同 —— 决定「保存」按钮是否可点。
+   *
+   * ⚠️ 这里**整体比较**，绝不要手写逐字段的 `!==` 链：原来只比了
+   * autoBackup / backupDir / prefix 三项，之后新增的 schedule（以及更早的
+   * skipCaches / provider / endpoint / bucket / region / gameDifficulty）都没跟上，
+   * 结果是**改了调度但 dirty 恒为 false，「保存」按钮一直点不动** ——
+   * 用户看到的现象就是"没有保存功能"。
+   *
+   * 键顺序不用担心：draft 与 baseline 都源自同一份 props.settings，
+   * 之后的更新一律用扩展运算符保持原顺序。
+   */
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline)
 
   /**
    * 落盘一份设置。
@@ -820,7 +832,7 @@ function SettingsBlock(props: {
           React.createElement(
             'span',
             { className: 'ob-hint', key: 'tip' },
-            '从每次备份**跑完**开始计时（不是从排定时刻算）',
+            '按**排定时刻**对齐（每 30 分钟 = :00 / :30，每 6 小时 = 00/06/12/18）',
           ),
         ])
       : null,
