@@ -1362,9 +1362,11 @@ function CredentialBlock(props: { snapshot: StateSnapshot; onChanged: () => void
         credentials.sessionOnly
           ? `本次进程已注入：${credentials.sessionVars.join('、')}`
           : env.accessKeyConfigured && env.secretKeyConfigured
-            ? credentials.fromOs.length > 0
-              ? `当前来自系统环境变量（启动时自动补读：${credentials.fromOs.join('、')}）`
-              : '当前来自环境变量'
+            ? credentials.fromDotenv.length > 0
+              ? `.env（${credentials.fromDotenv.join('、')}）`
+              : credentials.fromOs.length > 0
+                ? `系统环境变量（自动补读：${credentials.fromOs.join('、')}）`
+                : '当前来自环境变量'
             : '尚未配置',
       ),
     ]),

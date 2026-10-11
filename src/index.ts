@@ -42,6 +42,7 @@ import {
   type CredentialStore,
   type StoredCredentials,
 } from './credential-store.js'
+import { loadDotenv, type DotenvLoadResult } from './dotenv.js'
 import { hydrateEnvironment } from './env-source.js'
 import {
   describeOssEnvironment,
@@ -390,6 +391,38 @@ export function apply(ctx: PluginContext): void {
   const fromOsEnv = new Set<string>()
 
   /**
+   * 最近一次 `.env` 加载结果（**只有变量名，没有值**）。
+   *
+   * 优先级是 **`.env` > 系统环境变量**：`.env` 会**覆盖**进程里已有的值，
+   * 覆盖了哪些键会被记进 `overridden`（只有名字）。
+   */
+  let dotenv: DotenvLoadResult = {
+    path: null,
+    loaded: [],
+    skipped: [],
+    overridden: [],
+    error: null,
+  }
+
+  /** 本次启动里由 `.env` 提供了值的变量名（只有名字）—— 界面据此说明"这份配置从哪来"。 */
+  const fromDotenv = new Set<string>()
+
+  /**
+   * `.env` 的候选路径（按优先级从高到低）。
+   *
+   * 先看插件自己的配置目录（`<DSH home>/oss-backup/.env`），再看当前工作目录。
+   * 顺序是有意的：前者"专属"，不会被工作区里一个不相干的 `.env` 影响；
+   * 后者是 `.env` 最惯常的位置，方便"项目里放一份、跟代码一起管理"。
+   * 只采用**第一个能读到的**文件 —— 不做多层合并，否则出问题时没法解释值来自哪。
+   *
+   * @returns 候选路径。
+   */
+  const dotenvCandidates = (): string[] => [
+    join(dshHome(), 'oss-backup', '.env'),
+    join(process.cwd(), '.env'),
+  ]
+
+  /**
    * 把已加密保存的凭证灌进环境变量。
    *
    * 解密失败（换了机器 / 换了 Windows 账户）时后端会自己清掉坏文件并返回 `null`，
@@ -611,18 +644,39 @@ export function apply(ctx: PluginContext): void {
   void readSettings().then(async (loaded) => {
     settings = loaded
 
-    // ① 先补读系统环境变量：`setx` 写的是注册表，已经启动的 dsh web 未必继承到它。
-    //    这一步让"配一次环境变量就永久生效、什么都不用填"真正成立。
+    // ① 先读 `.env`（**只读，永不写入**）。
+    //
+    //    刻意排在系统环境**之前**：本插件的配置优先级是 `.env` > 系统环境变量。
+    //    `.env` 是你显式写在配置目录/项目里的那一份，应当比机器上残留的旧 export 更权威 ——
+    //    否则你在 `.env` 里换了密钥却毫无效果，"改了没反应"最难查。
+    //    被覆盖的键名会列进日志（只有名字）。
+    //
+    //    这也是为了兑现「process.env 只关心键在不在，不关心值从哪来」：
+    //    手动 export / setx / .env / Docker -e / CI Secret / `op run --` 一视同仁。
+    dotenv = await loadDotenv(dotenvCandidates(), process.env)
+    if (dotenv.path !== null) {
+      for (const name of dotenv.loaded) fromDotenv.add(name)
+      ctx.logger.info(
+        `[oss-backup] .env（${dotenv.path}）读入 ${dotenv.loaded.length} 个变量：${
+          dotenv.loaded.join('、') || '（无）'
+        }${dotenv.overridden.length > 0 ? `；覆盖了原有的：${dotenv.overridden.join('、')}` : ''}`,
+      )
+    } else if (dotenv.error !== null) {
+      ctx.logger.warn(`[oss-backup] .env 读取失败（已忽略）：${dotenv.error}`)
+    }
+
+    // ② 再补读系统环境变量：`setx` 写的是注册表，已经启动的 dsh web 未必继承到它。
+    //    它**不覆盖**已有值，所以上一步 `.env` 设过的会胜出 —— 这正是我们要的优先级。
     const hydrated = await hydrateEnvironment()
     for (const name of hydrated) fromOsEnv.add(name)
 
-    // ② 再把设置里的非机密连接信息灌进去（已有值不覆盖）。
+    // ③ 再把设置里的非机密连接信息灌进去（已有值不覆盖）。
     applySettingsToEnv()
 
-    // ③ 现在才判断要不要开持久化 —— 用户可能刚 setx 了 OSS_CREDENTIAL_STORE。
+    // ④ 现在才判断要不要开持久化 —— 用户可能刚 setx 了 OSS_CREDENTIAL_STORE。
     credentialStore = isCredentialStoreEnabled() ? createCredentialStore(dshHome()) : null
 
-    // ④ 最后尝试载入已加密保存的凭证（未开启持久化时这一步什么都不做）。
+    // ⑤ 最后尝试载入已加密保存的凭证（未开启持久化时这一步什么都不做）。
     await loadStoredCredentials()
     applyAutoBackup()
     applySchedule()
@@ -721,6 +775,8 @@ export function apply(ctx: PluginContext): void {
               sessionVars: [...sessionInjected],
               /** 本次启动里从系统环境补读到的变量名（`setx` 过但进程没继承到的那种）。 */
               fromOs: [...fromOsEnv],
+              /** 本次启动里由 `.env` 提供了值的变量名（`.env` 优先于系统环境）。 */
+              fromDotenv: [...fromDotenv],
               /** 是否至少注入过一个 —— 界面据此提示"重启后需重新填写"。 */
               sessionOnly: sessionInjected.size > 0,
               /** 是否允许"记住到本机"（由 `OSS_CREDENTIAL_STORE=os` 决定）。 */
@@ -733,6 +789,17 @@ export function apply(ctx: PluginContext): void {
               mode: settings.schedule.mode,
               description: describeSchedule(settings.schedule),
               nextRunAt: scheduleAt,
+            },
+            /**
+             * `.env` 的补读情况（**只有变量名，没有值**）。
+             *
+             * 让用户能确认"我放的那份 `.env` 到底被读到没、读的是哪一份"。
+             */
+            dotenv: {
+              path: dotenv.path,
+              loaded: [...dotenv.loaded],
+              skipped: [...dotenv.skipped],
+              error: dotenv.error,
             },
             last: state.last,
             history: state.history,

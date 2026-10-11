@@ -83,6 +83,8 @@ export interface StateSnapshot {
   settings: PluginSettingsView
   /** 凭证来源（**只有变量名，没有值**）。 */
   credentials: CredentialReport
+  /** `.env` 的加载情况（**只有变量名，没有值**）。 */
+  dotenv: DotenvReport
   /** 定期全量备份的运行态。 */
   schedule: ScheduleReport
   /**
@@ -109,10 +111,28 @@ export interface CredentialReport {
   sessionOnly: boolean
   /** 本次启动里从**系统环境**补读到的变量名（`setx` 过但进程没继承到的那种）。 */
   fromOs: readonly string[]
+  /** 本次启动里由 `.env` 提供了值的变量名（`.env` 优先于系统环境）。 */
+  fromDotenv: readonly string[]
   /** 是否允许"记住到本机"（由 `OSS_CREDENTIAL_STORE=os` 决定）。 */
   persistent: boolean
   /** 持久化后端说明；未启用为 null。 */
   storeLabel: string | null
+}
+
+/**
+ * `.env` 的加载情况（**只有变量名，没有值**）。
+ *
+ * 让用户能确认"我放的那份 `.env` 到底被读到没、读的是哪一份"。
+ */
+export interface DotenvReport {
+  /** 实际读取的文件路径；没读到任何候选文件时为 null。 */
+  path: string | null
+  /** 读入的变量名（只有名字）。 */
+  loaded: readonly string[]
+  /** 被 `.env` **覆盖掉**的变量名（只有名字）—— `.env` 优先于系统环境。 */
+  overridden: readonly string[]
+  /** 读取失败的原因（**已脱敏**）；正常为 null。 */
+  error: string | null
 }
 
 /** 自动备份的只读状态。 */
@@ -325,6 +345,7 @@ function toSnapshot(value: unknown): StateSnapshot | null {
       reachability: toReachability(env.reachability),
     },
     credentials: toCredentialReport(record.credentials),
+    dotenv: toDotenvReport(record.dotenv),
     schedule: toScheduleReport(record.schedule),
     // 缺字段时乐观放行（旧版宿主）：让操作自己去撞错误，比把按钮全锁死好。
     uploadAllowed: record.uploadAllowed !== false,
@@ -353,8 +374,29 @@ function toCredentialReport(value: unknown): CredentialReport {
     fromOs: Array.isArray(record.fromOs)
       ? record.fromOs.filter((item): item is string => typeof item === 'string')
       : [],
+    fromDotenv: Array.isArray(record.fromDotenv)
+      ? record.fromDotenv.filter((item): item is string => typeof item === 'string')
+      : [],
     persistent: record.persistent === true,
     storeLabel: typeof record.storeLabel === 'string' ? record.storeLabel : null,
+  }
+}
+
+/**
+ * 收窄 `.env` 的加载情况。
+ *
+ * @param value - 未知值。
+ * @returns `.env` 报告；无效时表示"没读到任何 .env"。
+ */
+function toDotenvReport(value: unknown): DotenvReport {
+  const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const names = (input: unknown): string[] =>
+    Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string') : []
+  return {
+    path: typeof record.path === 'string' ? record.path : null,
+    loaded: names(record.loaded),
+    overridden: names(record.overridden),
+    error: typeof record.error === 'string' ? record.error : null,
   }
 }
 
