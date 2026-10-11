@@ -1233,7 +1233,7 @@ function BackupGame(props: {
 
   return React.createElement('div', { className: 'ob-block' }, [
     React.createElement('div', { className: 'ob-row', key: 'head' }, [
-      React.createElement('span', { className: 'ob-sect-title', key: 't' }, '我们一起偷代码'),
+      React.createElement('span', { className: 'ob-sect-title', key: 't' }, '接数据'),
       React.createElement(
         'span',
         { className: phase === 'playing' ? 'ob-badge' : 'ob-hint', key: 's' },
