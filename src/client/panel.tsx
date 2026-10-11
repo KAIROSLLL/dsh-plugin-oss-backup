@@ -1431,6 +1431,8 @@ function ManualBlock(props: {
   const directory = snapshot.settings.backupDir
   const running = manual?.running === true
   const gameEnabled = snapshot.settings.gameEnabled
+  // 服务连不上时宿主已经把上传入口全拦了 —— 按钮直接禁用，别让人点了才发现不行。
+  const blocked = !snapshot.uploadAllowed
   const percent =
     manual !== null && manual !== undefined && manual.total > 0
       ? Math.round((manual.done / manual.total) * 100)
@@ -1475,12 +1477,26 @@ function ManualBlock(props: {
           key: 'run',
           type: 'button',
           className: 'ob-btn-primary',
-          disabled: running || starting || directory === '',
+          disabled: running || starting || directory === '' || blocked,
+          title: blocked ? (snapshot.uploadBlockedReason ?? '对象存储当前不可用') : undefined,
           onClick: start,
         },
-        running ? '备份中…' : starting ? '启动中…' : '立即备份',
+        blocked
+          ? '服务连不上，已暂停上传'
+          : running
+            ? '备份中…'
+            : starting
+              ? '启动中…'
+              : '立即备份',
       ),
       running && manual !== null ? React.createElement('span', { className: 'ob-hint', key: 'cur' }, `当前：${manual.current}`) : null,
+      blocked
+        ? React.createElement(
+            'span',
+            { className: 'ob-warn', key: 'blocked' },
+            `${snapshot.uploadBlockedReason ?? '对象存储当前不可用'} —— 请先确认服务已启动；恢复后会自动重新可用。`,
+          )
+        : null,
       note === '' ? null : React.createElement('span', { className: 'ob-warn', key: 'note' }, note),
     ]),
 

@@ -85,6 +85,14 @@ export interface StateSnapshot {
   credentials: CredentialReport
   /** 定期全量备份的运行态。 */
   schedule: ScheduleReport
+  /**
+   * 现在能不能上传。
+   *
+   * 为 `false` 时宿主已从源头拦下所有上传入口，界面应把按钮禁用掉。
+   */
+  uploadAllowed: boolean
+  /** 不能上传时的原因（**已脱敏**）；正常时为 `null`。 */
+  uploadBlockedReason: string | null
   /** 手动备份运行态（没跑过为 null）。 */
   manual: ManualReport | null
   /** 最近一次上传。 */
@@ -318,6 +326,12 @@ function toSnapshot(value: unknown): StateSnapshot | null {
     },
     credentials: toCredentialReport(record.credentials),
     schedule: toScheduleReport(record.schedule),
+    // 缺字段时乐观放行（旧版宿主）：让操作自己去撞错误，比把按钮全锁死好。
+    uploadAllowed: record.uploadAllowed !== false,
+    uploadBlockedReason:
+      record.uploadAllowed === false && typeof record.uploadBlockedReason === 'string'
+        ? record.uploadBlockedReason
+        : null,
     last: toRecord(record.last),
     history: Array.isArray(record.history) ? record.history.map(toRecord).filter((item): item is UploadRecord => item !== null) : [],
   }

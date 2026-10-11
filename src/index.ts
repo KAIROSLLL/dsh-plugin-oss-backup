@@ -306,6 +306,10 @@ export function apply(ctx: PluginContext): void {
             render: (_args, value) => [{ type: 'text', text: value }],
           },
           async execute(args) {
+            // 已确认连不上时**直接拒绝**，不去白跑一趟上传（连接类错误本来也重试无意义）。
+            if (!uploadAllowed()) {
+              throw new Error(`${uploadBlockedReason()} —— 已暂停上传，请确认服务已启动、端点与桶名正确。`)
+            }
             // busy 纯粹是界面信号：让设置页/侧边栏在上传期间弹出那张图。
             state.busy = true
             try {
@@ -345,6 +349,27 @@ export function apply(ctx: PluginContext): void {
    * 实际每次上传都在连接被拒。这个探测器真发一次 `HeadBucket` 来确认。
    */
   const reachability = new Reachability()
+
+  /**
+   * 现在是否允许上传。
+   *
+   * 可达性**还没探过**（`null`）时乐观放行 —— 否则插件一装好就把功能全锁住，
+   * 连"第一次试一下"都做不到。让操作自己去撞错误，再由上传结果把状态修正过来。
+   *
+   * 一旦**确认连不上**，就从源头不给上传入口：工具、手动备份、自动备份、定期备份一并拦。
+   */
+  const uploadAllowed = (): boolean => {
+    const last = reachability.last
+    return last === null || last.reachable
+  }
+
+  /** 上传被拦下时的说明（**已脱敏**），供工具与路由共用。 */
+  const uploadBlockedReason = (): string => {
+    const last = reachability.last
+    return last === null || last.error === null
+      ? '对象存储当前不可用'
+      : `对象存储连不上：${last.error}`
+  }
 
   /**
    * 本次会话里通过设置页注入过值的环境变量名（**只记名字，不记值**）。
@@ -425,6 +450,9 @@ export function apply(ctx: PluginContext): void {
     autoBackup?.dispose()
     autoBackup = null
     if (!settings.autoBackup) return
+    // 已确认连不上就先不建实例：省得每次文件改动都白跑一趟，也免得刷一屏失败日志。
+    // 连接恢复后这里会被重新调用（见 /state 里的探测回调）。
+    if (!uploadAllowed()) return
     autoBackup = new AutoBackup({
       config: {
         enabled: true,
@@ -551,6 +579,10 @@ export function apply(ctx: PluginContext): void {
       ctx.logger.warn('[oss-backup] 定期全量备份已开启，但还没设置备份目录 —— 暂不排期')
       return
     }
+    if (!uploadAllowed()) {
+      ctx.logger.warn(`[oss-backup] 定期全量备份暂不排期：${uploadBlockedReason()}`)
+      return
+    }
 
     const at = nextRunAt(settings.schedule, Date.now())
     if (at === null) return
@@ -627,7 +659,17 @@ export function apply(ctx: PluginContext): void {
           }
           // 顺手触发一次可达性探测（带缓存，命中就直接返回）——
           // 不阻塞这次响应，下一次轮询界面就能拿到结果。
-          void reachability.check()
+          //
+          // 顺带处理"从连不上恢复过来"：不可达时自动备份与定期排期是被主动停掉的，
+          // 连接回来后得把它们重新拉起来，否则要等用户重启才生效。
+          const wasReachable = reachability.last?.reachable
+          void reachability.check().then((probe) => {
+            if (wasReachable === false && probe.reachable) {
+              ctx.logger.info('[oss-backup] 对象存储已恢复连接，重新启用自动备份与定期备份')
+              applyAutoBackup()
+              applySchedule()
+            }
+          })
           sendJson(response, 200, {
             ok: true,
             plugin: name,
@@ -648,6 +690,15 @@ export function apply(ctx: PluginContext): void {
             settings: { ...settings },
             // 自动备份运行态：界面据此显示开关效果、排队数与**熔断状态**。
             autoBackup: autoBackupReport(),
+            /**
+             * 现在能不能上传。
+             *
+             * 为 `false` 时宿主已经**从源头拦下**所有上传入口（工具 / 手动 / 自动 / 定期），
+             * 界面据此把按钮禁用掉，别让用户点了才发现不行。
+             */
+            uploadAllowed: uploadAllowed(),
+            /** 不能上传时的原因（**已脱敏**）；正常时为 `null`。 */
+            uploadBlockedReason: uploadAllowed() ? null : uploadBlockedReason(),
             // 手动备份运行态：进度 + 上次汇总。
             manual:
               state.manual === null
@@ -879,6 +930,10 @@ export function apply(ctx: PluginContext): void {
           }
           if (settings.backupDir === '') {
             sendJson(response, 400, { ok: false, error: '还没设置备份目录' })
+            return
+          }
+          if (!uploadAllowed()) {
+            sendJson(response, 503, { ok: false, error: `${uploadBlockedReason()} —— 已暂停上传` })
             return
           }
           const root = settings.backupDir
