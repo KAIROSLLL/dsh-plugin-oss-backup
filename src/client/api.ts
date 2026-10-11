@@ -37,6 +37,22 @@ export interface EnvironmentReport {
     readonly bucket: string
     readonly region: string
   }
+  /**
+   * 对象存储的可达性（宿主真发过一次 `HeadBucket` 探出来的）。
+   *
+   * **变量配齐 ≠ 服务在跑** —— 这一项才是"能不能用"。`null` 表示还没探过。
+   */
+  reachability: ReachabilityReport | null
+}
+
+/** 一次可达性探测的结果。 */
+export interface ReachabilityReport {
+  /** 是否连得上（含凭证被接受、桶存在）。 */
+  reachable: boolean
+  /** 探测时刻（毫秒时间戳）。 */
+  checkedAt: number
+  /** 连不上时的原因（**已脱敏**）。 */
+  error: string | null
 }
 
 /** 一条上传记录。 */
@@ -103,6 +119,30 @@ export interface AutoBackupReport {
   retries: number
   /** 当前排队中的文件数。 */
   pending: number
+  /** 最近一次自动备份的结果（诊断靠它）。 */
+  last: AutoBackupLast | null
+  /** 是否处于**熔断暂停**中（连续失败太多，暂时不再尝试）。 */
+  paused: boolean
+  /** 熔断解除的时刻；未熔断为 `null`。 */
+  pausedUntil: number | null
+  /** 当前连续失败次数。 */
+  failures: number
+}
+
+/** 最近一次自动备份的结果。 */
+export interface AutoBackupLast {
+  /** ISO 时刻。 */
+  at: string
+  /** 已脱敏的文件路径。 */
+  filePath: string
+  /** 已脱敏的对象键。 */
+  objectKey: string
+  /** 是否成功。 */
+  ok: boolean
+  /** 成功时的字节数。 */
+  bytes: number
+  /** 失败原因（**已脱敏**）。 */
+  error: string | null
 }
 
 /** 界面可改的设置（**不含任何凭证**）。 */
@@ -274,6 +314,7 @@ function toSnapshot(value: unknown): StateSnapshot | null {
         bucket: typeof variableNames.bucket === 'string' ? variableNames.bucket : 'RUSTFS_BUCKET',
         region: typeof variableNames.region === 'string' ? variableNames.region : 'RUSTFS_REGION',
       },
+      reachability: toReachability(env.reachability),
     },
     credentials: toCredentialReport(record.credentials),
     schedule: toScheduleReport(record.schedule),
@@ -413,12 +454,53 @@ function toManualReport(value: unknown): ManualReport | null {
  */
 function toAutoBackup(value: unknown): AutoBackupReport {
   const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const last = toLastAuto(record.last)
   return {
     enabled: record.enabled === true,
     prefix: typeof record.prefix === 'string' ? record.prefix : 'workspace-backup/',
     debounceMs: typeof record.debounceMs === 'number' && Number.isFinite(record.debounceMs) ? record.debounceMs : 2000,
     retries: typeof record.retries === 'number' && Number.isFinite(record.retries) ? record.retries : 3,
     pending: typeof record.pending === 'number' && Number.isFinite(record.pending) ? record.pending : 0,
+    last,
+    paused: record.paused === true,
+    pausedUntil:
+      typeof record.pausedUntil === 'number' && Number.isFinite(record.pausedUntil) ? record.pausedUntil : null,
+    failures: typeof record.failures === 'number' && Number.isFinite(record.failures) ? record.failures : 0,
+  }
+}
+
+/**
+ * 收窄"最近一次自动备份的结果"。
+ *
+ * @param value - 未知值。
+ * @returns 结果或 null。
+ */
+function toLastAuto(value: unknown): AutoBackupLast | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  return {
+    at: typeof record.at === 'string' ? record.at : '',
+    filePath: typeof record.filePath === 'string' ? record.filePath : '',
+    objectKey: typeof record.objectKey === 'string' ? record.objectKey : '',
+    ok: record.ok === true,
+    bytes: typeof record.bytes === 'number' && Number.isFinite(record.bytes) ? record.bytes : 0,
+    error: typeof record.error === 'string' ? record.error : null,
+  }
+}
+
+/**
+ * 收窄可达性探测结果。
+ *
+ * @param value - 未知值。
+ * @returns 探测结果；没探过（或字段缺失）时为 null。
+ */
+function toReachability(value: unknown): ReachabilityReport | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  return {
+    reachable: record.reachable === true,
+    checkedAt: typeof record.checkedAt === 'number' && Number.isFinite(record.checkedAt) ? record.checkedAt : 0,
+    error: typeof record.error === 'string' ? record.error : null,
   }
 }
 

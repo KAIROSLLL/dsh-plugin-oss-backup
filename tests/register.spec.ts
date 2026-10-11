@@ -133,9 +133,15 @@ async function seedSettings(patch: { autoBackup?: boolean; backupDir?: string; p
  * @param harness - 观察结果。
  */
 async function waitForSettingsLoaded(harness: Harness): Promise<void> {
-  await vi.waitFor(() => {
-    expect(harness.logs.join('\n')).toContain('设置已加载')
-  })
+  // 超时比 waitFor 默认的 1 秒宽松：启动流程里有一趟"补读系统环境变量"
+  // （Windows 上要 spawn 一次 PowerShell 去查注册表），冷启动时可能超过 1 秒 ——
+  // 那不是失败，只是慢。
+  await vi.waitFor(
+    () => {
+      expect(harness.logs.join('\n')).toContain('设置已加载')
+    },
+    { timeout: 10_000, interval: 100 },
+  )
 }
 
 /** 一个被记下来的事件监听器。 */

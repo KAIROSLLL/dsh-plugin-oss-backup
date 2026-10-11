@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-oss-backup",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "DeepSeek Harness 插件：把工作区文件备份到 S3 兼容对象存储（RustFS / 阿里云 OSS / AWS S3）。AK/SK 只从环境变量读取，绝不落盘、绝不进日志。",
   "keywords": [
     "dsh",

@@ -12,7 +12,10 @@ import {
   AutoBackup,
   DEFAULT_BACKUP_PREFIX,
   DEFAULT_DEBOUNCE_MS,
+  DEFAULT_FAILURE_THRESHOLD,
+  DEFAULT_PAUSE_MS,
   DEFAULT_RETRY_BACKOFF_MS,
+  isFatalUploadError,
   normalizeBackupPrefix,
   readAutoBackupConfig,
   sanitizeObjectKeyTail,
@@ -51,6 +54,8 @@ function makeConfig(overrides: Partial<AutoBackupConfig> = {}): AutoBackupConfig
     prefix: DEFAULT_BACKUP_PREFIX,
     debounceMs: DEFAULT_DEBOUNCE_MS,
     backoffMs: DEFAULT_RETRY_BACKOFF_MS,
+    failureThreshold: DEFAULT_FAILURE_THRESHOLD,
+    pauseMs: DEFAULT_PAUSE_MS,
     ...overrides,
   }
 }
@@ -212,8 +217,10 @@ describe('AutoBackup 防抖', () => {
 describe('AutoBackup 重试与退避', () => {
   it('一直失败：共 4 次尝试，按 1s/2s/4s 退避，最后放弃并记日志', async () => {
     const { logger, warn, info } = makeLogger()
+    // 用**可重试**的错误（超时那类）：连接 / 凭证 / 桶类错误会走"快速失败"，
+    // 那是另一条路径，有专门的测试盯着（见下面的"不可重试"用例）。
     const upload = vi.fn(async () => {
-      throw new Error('上传到对象存储失败（bucket=dsh-backup）：InvalidAccessKeyId')
+      throw new Error('上传到对象存储失败（bucket=dsh-backup）：请求超时')
     })
     const backup = new AutoBackup({ config: makeConfig(), logger, upload })
 
@@ -281,6 +288,96 @@ describe('AutoBackup 重试与退避', () => {
     expect(text).not.toContain(ACCESS_KEY)
     expect(text).not.toContain(SECRET_KEY)
     expect(text).toContain('自动备份失败')
+
+    backup.dispose()
+  })
+})
+
+describe('连接不上时不要空转（快速失败 + 熔断）', () => {
+  it('isFatalUploadError：认得出连接 / 凭证 / 桶类错误，放得过超时类', () => {
+    expect(isFatalUploadError('connect ECONNREFUSED 127.0.0.1:9000')).toBe(true)
+    expect(isFatalUploadError('getaddrinfo ENOTFOUND oss.example.com')).toBe(true)
+    expect(isFatalUploadError('InvalidAccessKeyId')).toBe(true)
+    expect(isFatalUploadError('SignatureDoesNotMatch')).toBe(true)
+    expect(isFatalUploadError('NoSuchBucket')).toBe(true)
+    // 超时 / 5xx 这类是"可能自己好"的，必须仍然重试。
+    expect(isFatalUploadError('请求超时')).toBe(false)
+    expect(isFatalUploadError('InternalError: please retry')).toBe(false)
+  })
+
+  it('不可重试的错误只尝试一次，不等退避', async () => {
+    const { logger, warn } = makeLogger()
+    const upload = vi.fn(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:9000')
+    })
+    const backup = new AutoBackup({ config: makeConfig(), logger, upload })
+
+    backup.schedule('/ws/a.ts')
+    // 只推进防抖窗口。若是可重试错误，这里之后还会有 1s/2s/4s 三次重试。
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(upload).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(upload).toHaveBeenCalledTimes(1)
+    expect(warn.join('\n')).toContain('不可重试')
+
+    backup.dispose()
+  })
+
+  it('连续失败到阈值就熔断：期间的文件改动直接丢弃，不排队', async () => {
+    const { logger, warn } = makeLogger()
+    const upload = vi.fn(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:9000')
+    })
+    const backup = new AutoBackup({
+      config: makeConfig({ failureThreshold: 2, pauseMs: 30_000 }),
+      logger,
+      upload,
+    })
+
+    backup.schedule('/ws/a.ts')
+    await vi.advanceTimersByTimeAsync(2000)
+    backup.schedule('/ws/b.ts')
+    await vi.advanceTimersByTimeAsync(2000)
+
+    expect(upload).toHaveBeenCalledTimes(2)
+    expect(backup.paused).toBe(true)
+    expect(backup.failures).toBe(2)
+    expect(warn.join('\n')).toContain('已暂停')
+
+    // 暂停期间再改文件：直接丢掉，一次上传都不该发生，也不该排队。
+    backup.schedule('/ws/c.ts')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(upload).toHaveBeenCalledTimes(2)
+    expect(backup.pending).toBe(0)
+
+    // 暂停到期后恢复正常调度（终于能传出去）。
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(backup.paused).toBe(false)
+    upload.mockImplementation(async (input: { objectKey: string }) => okResult(input.objectKey))
+    backup.schedule('/ws/d.ts')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(upload).toHaveBeenCalledTimes(3)
+
+    backup.dispose()
+  })
+
+  it('成功一次就把连续失败计数清零', async () => {
+    const { logger } = makeLogger()
+    const upload = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED 127.0.0.1:9000'))
+      .mockImplementation(async (input: { objectKey: string }) => okResult(input.objectKey))
+    const backup = new AutoBackup({ config: makeConfig(), logger, upload })
+
+    backup.schedule('/ws/a.ts')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(backup.failures).toBe(1)
+
+    backup.schedule('/ws/b.ts')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(backup.failures).toBe(0)
+    expect(backup.paused).toBe(false)
 
     backup.dispose()
   })

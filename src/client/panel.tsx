@@ -501,6 +501,7 @@ function UploadBlock(props: { snapshot: StateSnapshot }): React.ReactElement {
   const { snapshot } = props
   const busy = snapshot.busy
   const last = snapshot.last
+  const autoLast = snapshot.autoBackup.last
   const samples = snapshot.history.map((item) => item.bytes)
 
   return React.createElement('div', { className: 'ob-block' }, [
@@ -509,9 +510,37 @@ function UploadBlock(props: { snapshot: StateSnapshot }): React.ReactElement {
       React.createElement(
         'span',
         { className: busy ? 'ob-badge' : 'ob-hint', key: 'state' },
-        busy ? '正在上传…' : last === null ? '待命中（还没有上传记录）' : `最近一次 ${formatTime(last.at)} · ${formatBytes(last.bytes)}`,
+        busy
+          ? '正在上传…'
+          : snapshot.autoBackup.paused
+            ? '已暂停自动备份'
+            : last === null
+              ? '待命中（还没有上传记录）'
+              : `最近一次 ${formatTime(last.at)} · ${formatBytes(last.bytes)}`,
       ),
     ]),
+
+    // 熔断提示：服务连不上时自动备份会连续失败，这里如实说明"为什么停了"。
+    snapshot.autoBackup.paused
+      ? React.createElement(
+          'div',
+          { className: 'ob-warn', key: 'paused' },
+          `自动备份已连续失败 ${snapshot.autoBackup.failures} 次，暂停中${
+            snapshot.autoBackup.pausedUntil === null
+              ? ''
+              : `（约 ${formatTime(new Date(snapshot.autoBackup.pausedUntil).toISOString())} 后恢复）`
+          } —— 多半是对象存储连不上，恢复后会自动继续，期间的文件改动会被跳过。`,
+        )
+      : null,
+
+    // 最近一次自动备份失败：不弹窗、不刷屏，但要让用户看得到原因（已脱敏）。
+    autoLast !== null && !autoLast.ok && !snapshot.autoBackup.paused
+      ? React.createElement(
+          'div',
+          { className: 'ob-warn', key: 'lastfail' },
+          `最近一次自动备份失败：${autoLast.error ?? '未知原因'}`,
+        )
+      : null,
 
     busy
       ? React.createElement('div', { className: 'ob-progress sweep', key: 'bar' }, [React.createElement('i', { key: 'i' })])
@@ -1519,15 +1548,30 @@ function EnvironmentBlock(props: { snapshot: StateSnapshot }): React.ReactElemen
     }),
   ]
 
+  // 「变量配齐」和「服务能用」是两回事：宿主会真发一次 HeadBucket 探可达性。
+  const reach = env.reachability
+  const unreachable = env.ready && reach !== null && !reach.reachable
+
   return React.createElement('div', { className: 'ob-block' }, [
     React.createElement('div', { className: 'ob-row', key: 'head' }, [
       React.createElement('span', { className: 'ob-sect-title', key: 't' }, '环境自检'),
       React.createElement(
         'span',
-        { className: env.ready ? 'ob-ok' : 'ob-bad', key: 's' },
-        env.ready ? '就绪' : `缺少 ${env.missing.length} 个变量`,
+        { className: env.ready && !unreachable ? 'ob-ok' : 'ob-bad', key: 's' },
+        !env.ready
+          ? `缺少 ${env.missing.length} 个变量`
+          : unreachable
+            ? '变量齐了，但服务连不上'
+            : '就绪',
       ),
     ]),
+    unreachable
+      ? React.createElement(
+          'div',
+          { className: 'ob-warn', key: 'unreachable' },
+          `对象存储连不上：${reach?.error ?? '未知原因'} —— 上传会失败，自动备份连续失败几次后会自行暂停。请确认服务已启动、端点与桶名正确。`,
+        )
+      : null,
     React.createElement('div', { className: 'ob-grid', key: 'grid' }, rows),
     env.ready
       ? React.createElement(
@@ -1639,13 +1683,27 @@ export function OssPanel(props: { variant?: 'settings' | 'panel' }): React.React
       React.createElement(MetricCard, {
         key: 'state',
         label: '环境状态',
-        value: snapshot === null ? '未连接' : env?.ready === true ? '就绪' : '缺配置',
+        value:
+          snapshot === null
+            ? '未连接'
+            : env?.ready !== true
+              ? '缺配置'
+              : env.reachability !== null && !env.reachability.reachable
+                ? '服务连不上'
+                : '就绪',
         sub:
           snapshot === null
             ? error ?? '正在读取…'
-            : `AK ${env?.accessKeyConfigured === true ? '已设置' : '未设置'} · SK ${env?.secretKeyConfigured === true ? '已设置' : '未设置'} · ${env?.region ?? ''}`,
+            : env?.ready === true && env.reachability !== null && !env.reachability.reachable
+              ? `已配 AK/SK，但连不上：${env.reachability.error ?? '未知原因'}`
+              : `AK ${env?.accessKeyConfigured === true ? '已设置' : '未设置'} · SK ${env?.secretKeyConfigured === true ? '已设置' : '未设置'} · ${env?.region ?? ''}`,
         live: busy,
-        tone: snapshot === null ? undefined : env?.ready === true ? 'ok' : 'bad',
+        tone:
+          snapshot === null
+            ? undefined
+            : env?.ready !== true || (env.reachability !== null && !env.reachability.reachable)
+              ? 'bad'
+              : 'ok',
       }),
     ]),
 
@@ -1741,8 +1799,12 @@ export function OssSidebarEntry(props: { size?: number; active?: boolean }): Rea
 
   const busy = snapshot?.busy === true
   const ready = snapshot !== null && snapshot.environment.ready
-  const caption = snapshot === null ? '未连接' : busy ? '上传中' : ready ? '已就绪' : '缺配置'
-  const tone = snapshot === null ? undefined : busy || ready ? 'ob-ok' : 'ob-bad'
+  // 「配好了变量」和「服务真的连得上」是两回事 —— 侧边栏也要如实反映后者。
+  const unreachable =
+    ready && snapshot.environment.reachability !== null && !snapshot.environment.reachability.reachable
+  const caption =
+    snapshot === null ? '未连接' : busy ? '上传中' : unreachable ? '连不上' : ready ? '已就绪' : '缺配置'
+  const tone = snapshot === null ? undefined : busy || (ready && !unreachable) ? 'ob-ok' : 'ob-bad'
 
   return React.createElement('div', { className: 'ob-bar' }, [
     React.createElement(

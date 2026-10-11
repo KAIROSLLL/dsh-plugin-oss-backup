@@ -35,6 +35,47 @@ export const DEFAULT_DEBOUNCE_MS = 2000
 /** 默认指数退避表（毫秒）：1s / 2s / 4s，长度即重试次数。 */
 export const DEFAULT_RETRY_BACKOFF_MS: readonly number[] = [1000, 2000, 4000]
 
+/**
+ * 连续失败多少次后**熔断**（暂停自动备份）。
+ *
+ * 服务没开的时候，每个改动的文件都要白等一轮退避（默认 1+2+4 = 7 秒）才放弃；
+ * 模型连着改几个文件，观感就是"自动备份一直在跑，停不下来"。
+ */
+export const DEFAULT_FAILURE_THRESHOLD = 3
+
+/** 熔断后的暂停时长（毫秒）。 */
+export const DEFAULT_PAUSE_MS = 60_000
+
+/**
+ * 命中这些模式的失败**重试没有意义**，直接快速失败。
+ *
+ * 主要是连接类（服务没起、DNS 不对、网络不通）和凭证 / 桶类（配错了）：
+ * 它们不会因为多等 4 秒就变好，只会让用户觉得插件卡住了。
+ */
+const FATAL_ERROR_PATTERNS: readonly RegExp[] = [
+  /ECONNREFUSED/i,
+  /ENOTFOUND/i,
+  /EHOSTUNREACH/i,
+  /ENETUNREACH/i,
+  /ECONNRESET/i,
+  /EPIPE/i,
+  /CredentialsError/i,
+  /InvalidAccessKeyId/i,
+  /SignatureDoesNotMatch/i,
+  /AccessDenied/i,
+  /NoSuchBucket/i,
+]
+
+/**
+ * 判断一次失败是否**不值得重试**。
+ *
+ * @param reason - **已脱敏**的失败原因。
+ * @returns 命中连接 / 凭证 / 桶类错误时为 `true`。
+ */
+export function isFatalUploadError(reason: string): boolean {
+  return FATAL_ERROR_PATTERNS.some((pattern) => pattern.test(reason))
+}
+
 /** 自动备份配置。 */
 export interface AutoBackupConfig {
   /** 是否启用。 */
@@ -45,6 +86,10 @@ export interface AutoBackupConfig {
   readonly debounceMs: number
   /** 退避表；`length` 就是重试次数。 */
   readonly backoffMs: readonly number[]
+  /** 连续失败多少次后熔断（`0` = 不熔断）。 */
+  readonly failureThreshold: number
+  /** 熔断后的暂停时长（毫秒）。 */
+  readonly pauseMs: number
 }
 
 /** 只用到两个方法的日志器（便于测试注入）。 */
@@ -95,6 +140,8 @@ export function readAutoBackupConfig(env: NodeJS.ProcessEnv = process.env): Auto
     prefix: normalizeBackupPrefix(env[AUTO_BACKUP_ENV.prefix]),
     debounceMs: DEFAULT_DEBOUNCE_MS,
     backoffMs: DEFAULT_RETRY_BACKOFF_MS,
+    failureThreshold: DEFAULT_FAILURE_THRESHOLD,
+    pauseMs: DEFAULT_PAUSE_MS,
   }
 }
 
@@ -176,6 +223,10 @@ export class AutoBackup {
   private readonly onStart: (() => void) | undefined
   private readonly onResult: ((outcome: AutoBackupOutcome) => void) | undefined
   private disposed = false
+  /** 连续失败次数（成功一次就清零）。 */
+  private failureStreak = 0
+  /** 熔断解除时刻；`0` = 未熔断。 */
+  private pausedUntil = 0
 
   /**
    * @param deps - 配置、日志与可注入实现。
@@ -202,6 +253,21 @@ export class AutoBackup {
     return this.timers.size + this.inflight.size
   }
 
+  /** 是否处于熔断暂停中（服务连不上时会短暂为 `true`）。 */
+  get paused(): boolean {
+    return this.pausedUntil > Date.now()
+  }
+
+  /** 熔断解除的时刻；未熔断为 `0`。 */
+  get pausedUntilMs(): number {
+    return this.pausedUntil
+  }
+
+  /** 当前连续失败次数。 */
+  get failures(): number {
+    return this.failureStreak
+  }
+
   /**
    * 登记一次文件变更。
    *
@@ -211,6 +277,9 @@ export class AutoBackup {
    */
   schedule(filePath: string): void {
     if (this.disposed || !this.config.enabled) return
+    // 熔断期间直接丢弃，**不排队**：服务没开的时候把变更堆起来，只会让
+    // "一直在跑"的观感更糟；等恢复后补传一堆过期文件也没有意义。
+    if (this.paused) return
     const normalized = filePath.trim()
     if (normalized === '') return
 
@@ -245,7 +314,10 @@ export class AutoBackup {
     try {
       const result = await this.uploadWithRetry(filePath, objectKey)
       if (result.ok) {
+        this.failureStreak = 0
         this.logger.info(`[oss-backup] 自动备份完成：${objectKey}（${result.bytes} 字节）`)
+      } else {
+        this.noteFailure(result.error)
       }
       this.notifyResult({
         filePath,
@@ -257,6 +329,24 @@ export class AutoBackup {
     } finally {
       this.inflight.delete(filePath)
     }
+  }
+
+  /**
+   * 记一次失败，必要时**熔断**。
+   *
+   * 连续失败到阈值就暂停一段时间，期间新来的变更会被 {@link schedule} 直接丢掉 ——
+   * 这是"服务没开时自动备份一直在跑"的根治手段。
+   *
+   * @param reason - **已脱敏**的失败原因。
+   */
+  private noteFailure(reason: string): void {
+    this.failureStreak += 1
+    const { failureThreshold, pauseMs } = this.config
+    if (failureThreshold <= 0 || this.failureStreak < failureThreshold || this.paused) return
+    this.pausedUntil = Date.now() + pauseMs
+    this.logger.warn(
+      `[oss-backup] 自动备份连续失败 ${this.failureStreak} 次，已暂停 ${Math.round(pauseMs / 1000)} 秒（期间的文件改动会被跳过）—— ${reason}`,
+    )
   }
 
   /** 安全地调用 `onStart`（观察者出错不能影响调度器）。 */
@@ -296,6 +386,9 @@ export class AutoBackup {
    *
    * 尝试次数 = 退避表长度 + 1（首次 + 每次退避后的重试）；全部失败返回失败结局并记日志。
    *
+   * **连接 / 凭证 / 桶类错误不重试**（见 {@link isFatalUploadError}）：服务没开的时候，
+   * 每个文件都白等 7 秒才放弃，模型连着改几个文件就会让人觉得"插件卡住了"。
+   *
    * @param filePath - 文件路径。
    * @param objectKey - 目标对象键。
    * @returns 结局：成功带字节数，失败带**已脱敏**的原因。
@@ -313,6 +406,11 @@ export class AutoBackup {
       } catch (error) {
         // 出口脱敏：失败原因里可能夹带 SDK 的签名串，绝不能原样进日志。
         reason = safeErrorMessage(error)
+        // 连不上 / 凭证错 / 桶不存在：重试只是白白拖时间，直接失败。
+        if (isFatalUploadError(reason)) {
+          this.logger.warn(`[oss-backup] 自动备份失败（不可重试，不再重试）：${objectKey} —— ${reason}`)
+          return { ok: false, error: reason }
+        }
         const wait = backoff[attempt]
         if (wait === undefined) {
           this.logger.warn(
@@ -336,9 +434,10 @@ export class AutoBackup {
    * @returns 到点后 resolve。
    */
   private sleep(ms: number): Promise<void> {
+    // ⚠️ 不要 unref()：unref 过的定时器在事件循环没有别的句柄时不会触发，
+    // 退避重试会静默地变成"永不重试"。这里是短命等待，到点即清。
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms)
-      if (typeof timer.unref === 'function') timer.unref()
+      setTimeout(resolve, ms)
     })
   }
 }

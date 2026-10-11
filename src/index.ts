@@ -22,6 +22,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   AutoBackup,
   DEFAULT_DEBOUNCE_MS,
+  DEFAULT_FAILURE_THRESHOLD,
+  DEFAULT_PAUSE_MS,
   DEFAULT_RETRY_BACKOFF_MS,
   type AutoBackupConfig,
 } from './auto-backup.js'
@@ -56,6 +58,7 @@ import {
   type ManualResult,
 } from './manual-backup.js'
 import { redactSecrets, safeErrorMessage } from './redact.js'
+import { Reachability } from './reachability.js'
 import { describeSchedule, nextRunAt } from './schedule.js'
 import { DEFAULT_SETTINGS, dshHome, readSettings, writeSettings, type PluginSettings } from './settings.js'
 import { uploadFileToOss } from './upload.js'
@@ -335,6 +338,15 @@ export function apply(ctx: PluginContext): void {
   let autoBackup: AutoBackup | null = null
 
   /**
+   * 对象存储的可达性探测器。
+   *
+   * 存在的理由：`describeOssEnvironment()` 只检查环境变量**配没配齐**，
+   * 于是「变量都填了、但 RustFS 没启动」也会显示成就绪。用户看着绿色就绪，
+   * 实际每次上传都在连接被拒。这个探测器真发一次 `HeadBucket` 来确认。
+   */
+  const reachability = new Reachability()
+
+  /**
    * 本次会话里通过设置页注入过值的环境变量名（**只记名字，不记值**）。
    *
    * 用来在界面上如实区分"凭证来自启动时的环境变量"还是"本次会话现填的"。
@@ -419,6 +431,9 @@ export function apply(ctx: PluginContext): void {
         prefix: settings.prefix,
         debounceMs: DEFAULT_DEBOUNCE_MS,
         backoffMs: DEFAULT_RETRY_BACKOFF_MS,
+        // 连续失败到阈值就熔断：服务没开的时候不要一直空转重试。
+        failureThreshold: DEFAULT_FAILURE_THRESHOLD,
+        pauseMs: DEFAULT_PAUSE_MS,
       },
       logger: ctx.logger,
       // 尽量把对象键做成更好读的形式；净化由 AutoBackup 内部保证。
@@ -441,11 +456,39 @@ export function apply(ctx: PluginContext): void {
           error: outcome.error,
         }
         if (outcome.ok) {
+          // 上传成功 —— 对象存储显然是可达的，顺手修正探测缓存。
+          reachability.markReachable()
           remember(state, { at, objectKey: outcome.objectKey, bytes: outcome.bytes })
+        } else if (outcome.error !== null) {
+          // 失败也立刻反映到界面上：不用等下一次探测才知道"连不上"。
+          reachability.markUnreachable(outcome.error)
         }
       },
     })
   }
+
+  // 熔断状态的对外出口：界面据此提示"已暂停"。
+  const autoBackupReport = (): {
+    enabled: boolean
+    prefix: string
+    debounceMs: number
+    retries: number
+    pending: number
+    last: typeof state.lastAuto
+    paused: boolean
+    pausedUntil: number | null
+    failures: number
+  } => ({
+    enabled: settings.autoBackup,
+    prefix: settings.prefix,
+    debounceMs: DEFAULT_DEBOUNCE_MS,
+    retries: DEFAULT_RETRY_BACKOFF_MS.length,
+    pending: autoBackup?.pending ?? 0,
+    last: state.lastAuto,
+    paused: autoBackup?.paused ?? false,
+    pausedUntil: autoBackup !== null && autoBackup.paused ? autoBackup.pausedUntilMs : null,
+    failures: autoBackup?.failures ?? 0,
+  })
 
   // 监听**始终**注册；开关只决定"要不要真的调度"。这样在界面上拨开关不需要动监听，
   // 也避免了"注册/注销监听"与"读设置"之间的时序竞态。
@@ -582,6 +625,9 @@ export function apply(ctx: PluginContext): void {
             sendJson(response, 405, { ok: false, error: 'GET only' })
             return
           }
+          // 顺手触发一次可达性探测（带缓存，命中就直接返回）——
+          // 不阻塞这次响应，下一次轮询界面就能拿到结果。
+          void reachability.check()
           sendJson(response, 200, {
             ok: true,
             plugin: name,
@@ -600,16 +646,8 @@ export function apply(ctx: PluginContext): void {
             // 安全性不受影响：settings 是 normalizeSettings() 的产物，
             // 它只回填那组已知字段，任何凭证字段在入口处就被丢弃了。
             settings: { ...settings },
-            // 自动备份运行态：界面据此显示开关效果与排队数。
-            autoBackup: {
-              enabled: settings.autoBackup,
-              prefix: settings.prefix,
-              debounceMs: DEFAULT_DEBOUNCE_MS,
-              retries: DEFAULT_RETRY_BACKOFF_MS.length,
-              pending: autoBackup?.pending ?? 0,
-              // 最近一次自动备份的结果（成功/失败 + 已脱敏的原因）——诊断全靠它。
-              last: state.lastAuto,
-            },
+            // 自动备份运行态：界面据此显示开关效果、排队数与**熔断状态**。
+            autoBackup: autoBackupReport(),
             // 手动备份运行态：进度 + 上次汇总。
             manual:
               state.manual === null
@@ -620,7 +658,12 @@ export function apply(ctx: PluginContext): void {
                     progress: state.manual.progress,
                     result: state.manual.result,
                   },
-            environment: describeOssEnvironment(),
+            environment: {
+              ...describeOssEnvironment(),
+              // 可达性：**配好变量 ≠ 服务在跑**。这里报最近一次真探测的结果
+              // （首次进来还没探过就是 null，下方会异步补一次探测）。
+              reachability: reachability.last,
+            },
             // 凭证来源：让界面能如实说明"这是启动时环境变量里的，还是本次会话现填的"。
             credentials: {
               /** 本次会话通过设置页注入过的变量名（只有名字，没有值）。 */
