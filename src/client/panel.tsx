@@ -121,6 +121,8 @@ export const CSS = [
   '.ob-wrap .ob-input:focus{border-color:var(--dsw-alias-brand-primary)}',
   // 数字输入（调度用）：固定窄宽度，别把整行撑开。
   '.ob-wrap .ob-num{flex:0 0 auto;min-width:0;width:62px;text-align:center}',
+  // 被锁住的控件（服务连不上时）要一眼看得出不能点，而不是只有鼠标悬停才知道。
+  '.ob-wrap button:disabled,.ob-wrap input:disabled{opacity:.45;cursor:not-allowed}',
   '.ob-wrap .ob-btn-primary{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);font-weight:600;padding:7px 20px}',
   '.ob-wrap .ob-btn-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover);border-color:var(--dsw-alias-button-primary-hover)}',
   '.ob-progress{height:6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}',
@@ -630,6 +632,10 @@ function SettingsBlock(props: {
   report: AutoBackupReport
   /** 定期全量备份的下次**实际**触发时刻（宿主报的；未排期为 null）。 */
   nextRunAt: number | null
+  /** 宿主现在是否允许上传（`false` 时自动／定期备份都会被拦，设置要相应锁住）。 */
+  uploadAllowed: boolean
+  /** 不许上传时的原因（**已脱敏**）。 */
+  blockedReason: string | null
   onSaved: () => void
 }): React.ReactElement {
   const [draft, setDraft] = useState<PluginSettingsView>(props.settings)
@@ -638,6 +644,8 @@ function SettingsBlock(props: {
   const [saving, setSaving] = useState(false)
   const [note, setNote] = useState('')
   const [advanced, setAdvanced] = useState(false)
+  // 服务连不上时宿主已经拦下所有上传 —— 自动／定期备份相关的设置要一起锁住。
+  const blocked = !props.uploadAllowed
 
   // 只有宿主那边的**值**真的变了才同步草稿（同值轮询不该打断输入）。
   //
@@ -705,6 +713,17 @@ function SettingsBlock(props: {
     ]),
 
     // 自动备份开关：即点即存
+    //
+    // ⚠️ 服务连不上时必须**连开关一起锁住**：宿主那边确实不会上传（applyAutoBackup 直接
+    // 不建实例），但如果开关还能拨，用户会以为"开了就在备份"—— 拨了没反应比不让拨更糟。
+    blocked
+      ? React.createElement(
+          'div',
+          { className: 'ob-warn', key: 'blocked' },
+          `${props.blockedReason ?? '对象存储当前不可用'} —— 自动备份与定期备份暂时不可用，因此下面的开关已锁定；服务恢复后会自动解锁。`,
+        )
+      : null,
+
     React.createElement('div', { className: 'ob-row', key: 'toggle' }, [
       React.createElement(
         'button',
@@ -713,8 +732,12 @@ function SettingsBlock(props: {
           type: 'button',
           className: draft.autoBackup ? 'ob-switch on' : 'ob-switch',
           'aria-pressed': draft.autoBackup,
-          title: draft.autoBackup ? '点击关闭自动备份' : '点击开启自动备份',
-          disabled: saving,
+          title: blocked
+            ? (props.blockedReason ?? '对象存储当前不可用')
+            : draft.autoBackup
+              ? '点击关闭自动备份'
+              : '点击开启自动备份',
+          disabled: saving || blocked,
           onClick: toggle,
         },
         React.createElement('i', { key: 'knob' }),
@@ -722,9 +745,11 @@ function SettingsBlock(props: {
       React.createElement(
         'span',
         { className: 'ob-hint', key: 'label' },
-        draft.autoBackup
-          ? `自动备份：开 —— write / edit 落盘后防抖 ${props.report.debounceMs}ms 自动上传`
-          : '自动备份：关（默认）',
+        blocked
+          ? '自动备份：已锁定（对象存储连不上，开了也不会真的上传）'
+          : draft.autoBackup
+            ? `自动备份：开 —— write / edit 落盘后防抖 ${props.report.debounceMs}ms 自动上传`
+            : '自动备份：关（默认）',
       ),
       draft.autoBackup && props.report.pending > 0
         ? React.createElement('span', { className: 'ob-badge', key: 'pending' }, `排队 ${props.report.pending}`)
@@ -803,6 +828,7 @@ function SettingsBlock(props: {
     ]),
 
     // 定期全量备份：按时间表把整个备份目录完整传一遍（与"文件一改就传"是两套）
+    // 服务连不上时这块也锁住 —— 宿主不会排期，让用户改时间表只会造成误解。
     React.createElement('div', { className: 'ob-row', key: 'sched-mode' }, [
       React.createElement('span', { className: 'ob-hint', key: 'k' }, '定期全量备份'),
       ...(SCHEDULE_MODES.map((item) =>
@@ -812,6 +838,8 @@ function SettingsBlock(props: {
             key: item.id,
             type: 'button',
             className: draft.schedule.mode === item.id ? 'ob-btn-primary' : undefined,
+            disabled: blocked,
+            title: blocked ? (props.blockedReason ?? '对象存储当前不可用') : item.label,
             onClick: () =>
               setDraft((current) => ({
                 ...current,
@@ -832,6 +860,7 @@ function SettingsBlock(props: {
             type: 'number',
             className: 'ob-input ob-num',
             min: 1,
+            disabled: blocked,
             value: String(draft.schedule.every),
             onChange: (event: { target: { value: string } }) =>
               setDraft((current) => ({
@@ -849,6 +878,7 @@ function SettingsBlock(props: {
                 key: item.id,
                 type: 'button',
                 className: draft.schedule.unit === item.id ? 'ob-btn-primary' : undefined,
+                disabled: blocked,
                 onClick: () =>
                   setDraft((current) => ({
                     ...current,
@@ -881,6 +911,7 @@ function SettingsBlock(props: {
                 className: 'ob-input ob-num',
                 min: 1,
                 max: 28,
+                disabled: blocked,
                 value: String(draft.schedule.dayOfMonth),
                 onChange: (event: { target: { value: string } }) =>
                   setDraft((current) => ({
@@ -901,6 +932,7 @@ function SettingsBlock(props: {
             className: 'ob-input ob-num',
             min: 0,
             max: 23,
+            disabled: blocked,
             value: String(draft.schedule.hour).padStart(2, '0'),
             onChange: (event: { target: { value: string } }) =>
               setDraft((current) => ({
@@ -918,6 +950,7 @@ function SettingsBlock(props: {
             className: 'ob-input ob-num',
             min: 0,
             max: 59,
+            disabled: blocked,
             value: String(draft.schedule.minute).padStart(2, '0'),
             onChange: (event: { target: { value: string } }) =>
               setDraft((current) => ({
@@ -1764,6 +1797,8 @@ export function OssPanel(props: { variant?: 'settings' | 'panel' }): React.React
           settings: snapshot.settings,
           report: snapshot.autoBackup,
           nextRunAt: snapshot.schedule.nextRunAt,
+          uploadAllowed: snapshot.uploadAllowed,
+          blockedReason: snapshot.uploadBlockedReason,
           onSaved: () => {
             void refresh()
           },
