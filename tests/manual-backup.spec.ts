@@ -15,6 +15,7 @@ import {
   type BackupPlan,
   type CollectDeps,
 } from '../src/manual-backup.js'
+import { UploadIndex } from '../src/upload-index.js'
 
 /** 哨兵凭证（不是真值）：用来断言失败原因被脱敏。 */
 const ACCESS_KEY = 'AKIAIOSFODNN7EXAMPLE'
@@ -164,6 +165,7 @@ describe('runManualBackup', () => {
     truncated: false,
     totalBytes: 300,
     unreadable: 0,
+    fingerprints: new Map(),
   }
 
   it('逐个上传，统计成功数与字节数', async () => {
@@ -226,5 +228,128 @@ describe('runManualBackup', () => {
     })
     const result = await runManualBackup({ plan, prefix: 'bk/', upload })
     expect(result.errors.join('\n')).not.toContain(ACCESS_KEY)
+  })
+
+  describe('查重：不重复上传没变化的文件', () => {
+    /** 带指纹的计划：两个文件都有 `(size, mtimeMs)`。 */
+    const fingerprinted: BackupPlan = {
+      ...plan,
+      fingerprints: new Map([
+        ['D:/ws/src/index.ts', { size: 100, mtimeMs: 1_000 }],
+        ['D:/ws/README.md', { size: 200, mtimeMs: 2_000 }],
+      ]),
+    }
+
+    it('索引命中 → 跳过上传，并计入 skippedUnchanged', async () => {
+      const index = new UploadIndex()
+      index.remember('bk/ws/src/index.ts', { size: 100, mtimeMs: 1_000 })
+      index.remember('bk/ws/README.md', { size: 200, mtimeMs: 2_000 })
+      const upload = vi.fn(async () => ({ bytes: 10 }))
+
+      const result = await runManualBackup({ plan: fingerprinted, prefix: 'bk/', upload, index })
+
+      expect(upload).not.toHaveBeenCalled()
+      expect(result.skippedUnchanged).toBe(2)
+      expect(result.uploaded).toBe(0)
+      expect(result.bytes).toBe(0)
+      // 总数不变：跳过的也算"处理过了"，进度不会卡在半路。
+      expect(result.total).toBe(2)
+    })
+
+    it('只有一个文件变了 → 只传那一个', async () => {
+      const index = new UploadIndex()
+      index.remember('bk/ws/src/index.ts', { size: 100, mtimeMs: 1_000 })
+      // README 的 mtime 变了 → 要重传
+      index.remember('bk/ws/README.md', { size: 200, mtimeMs: 9_999 })
+      const upload = vi.fn(async () => ({ bytes: 200 }))
+
+      const result = await runManualBackup({ plan: fingerprinted, prefix: 'bk/', upload, index })
+
+      expect(upload).toHaveBeenCalledTimes(1)
+      expect(upload.mock.calls[0]?.[0].objectKey).toBe('bk/ws/README.md')
+      expect(result.uploaded).toBe(1)
+      expect(result.skippedUnchanged).toBe(1)
+      expect(result.bytes).toBe(200)
+    })
+
+    it('上传成功后自动记账，第二次同样的计划全部跳过', async () => {
+      const index = new UploadIndex()
+      const upload = vi.fn(async () => ({ bytes: 10 }))
+
+      const first = await runManualBackup({ plan: fingerprinted, prefix: 'bk/', upload, index })
+      expect(first.uploaded).toBe(2)
+      expect(first.skippedUnchanged).toBe(0)
+
+      // 同一份计划再跑一次：内容没动过，应该一个都不传。
+      const second = await runManualBackup({ plan: fingerprinted, prefix: 'bk/', upload, index })
+      expect(second.uploaded).toBe(0)
+      expect(second.skippedUnchanged).toBe(2)
+      expect(upload).toHaveBeenCalledTimes(2)
+    })
+
+    it('**上传失败的文件不记账** —— 下次还得再试', async () => {
+      const index = new UploadIndex()
+      const upload = vi.fn(async () => {
+        throw new Error('boom')
+      })
+      await runManualBackup({ plan: fingerprinted, prefix: 'bk/', upload, index })
+      expect(index.count).toBe(0)
+    })
+
+    it('skipUnchanged: false 时无视索引，全部重传', async () => {
+      const index = new UploadIndex()
+      index.remember('bk/ws/src/index.ts', { size: 100, mtimeMs: 1_000 })
+      index.remember('bk/ws/README.md', { size: 200, mtimeMs: 2_000 })
+      const upload = vi.fn(async () => ({ bytes: 10 }))
+
+      const result = await runManualBackup({
+        plan: fingerprinted,
+        prefix: 'bk/',
+        upload,
+        index,
+        skipUnchanged: false,
+      })
+
+      expect(upload).toHaveBeenCalledTimes(2)
+      expect(result.skippedUnchanged).toBe(0)
+    })
+
+    it('没给索引时不查重（保持原有行为）', async () => {
+      const upload = vi.fn(async () => ({ bytes: 10 }))
+      const result = await runManualBackup({ plan: fingerprinted, prefix: 'bk/', upload })
+      expect(upload).toHaveBeenCalledTimes(2)
+      expect(result.skippedUnchanged).toBe(0)
+    })
+
+    it('**没有指纹的文件一定上传** —— 查重宁可漏跳，不能误跳', async () => {
+      const index = new UploadIndex()
+      index.remember('bk/ws/src/index.ts', { size: 100, mtimeMs: 1_000 })
+      index.remember('bk/ws/README.md', { size: 200, mtimeMs: 2_000 })
+      // 计划里一个指纹都没有（例如 stat 拿不到 mtimeMs）
+      const noFingerprints: BackupPlan = { ...plan, fingerprints: new Map() }
+      const upload = vi.fn(async () => ({ bytes: 10 }))
+
+      const result = await runManualBackup({ plan: noFingerprints, prefix: 'bk/', upload, index })
+
+      expect(upload).toHaveBeenCalledTimes(2)
+      expect(result.skippedUnchanged).toBe(0)
+    })
+
+    it('进度回调里带上已跳过数', async () => {
+      const index = new UploadIndex()
+      index.remember('bk/ws/src/index.ts', { size: 100, mtimeMs: 1_000 })
+      index.remember('bk/ws/README.md', { size: 200, mtimeMs: 2_000 })
+      const skipped: number[] = []
+
+      await runManualBackup({
+        plan: fingerprinted,
+        prefix: 'bk/',
+        upload: async () => ({ bytes: 1 }),
+        index,
+        onProgress: (p) => skipped.push(p.skipped),
+      })
+
+      expect(skipped).toEqual([1, 2])
+    })
   })
 })

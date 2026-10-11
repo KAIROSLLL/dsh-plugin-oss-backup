@@ -1550,6 +1550,9 @@ function ManualBlock(props: {
           'div',
           { className: 'ob-hint', key: 'result' },
           `上次：共 ${manual.result.total} 个文件 → 成功 ${manual.result.uploaded} / 失败 ${manual.result.failed} · ${formatBytes(manual.result.bytes)}` +
+            (manual.result.skippedUnchanged > 0
+              ? ` · 跳过 ${manual.result.skippedUnchanged} 个未变化的`
+              : '') +
             (manual.result.skippedFiles > 0 ? ` · 因限额跳过 ${manual.result.skippedFiles} 个` : '') +
             (manual.result.truncated ? ' · 已触到文件数上限' : ''),
         )

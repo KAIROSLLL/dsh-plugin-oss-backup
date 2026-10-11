@@ -233,6 +233,8 @@ export interface ManualSummary {
   uploaded: number
   /** 失败数。 */
   failed: number
+  /** 因"内容没变、已经传过"而跳过的文件数。 */
+  skippedUnchanged: number
   /** 成功字节数。 */
   bytes: number
   /** 是否因限额被截断。 */
@@ -493,6 +495,7 @@ function toManualReport(value: unknown): ManualReport | null {
             total: number(rawResult.total),
             uploaded: number(rawResult.uploaded),
             failed: number(rawResult.failed),
+            skippedUnchanged: number(rawResult.skippedUnchanged),
             bytes: number(rawResult.bytes),
             truncated: rawResult.truncated === true,
             skippedFiles: number(rawResult.skippedFiles),

@@ -280,6 +280,14 @@ setx AWS_SECRET_ACCESS_KEY  "<IAM 用户 Secret Access Key>"
 
 它会**递归备份整个文件夹**，完成后显示：共多少个文件 → 成功几个 / 失败几个 · 总大小。
 
+**没变化的文件会自动跳过。** 插件在 `~/.dsh/oss-backup/uploaded.json` 里记着每个对象键对应的
+`(文件大小, 修改时间)`，下次备份时一致的直接跳过 —— 所以重复点「立即备份」只会传真正改过的
+那几个，不会再把你几千个没动过的文件重传一遍。界面会显示「跳过 N 个未变化的」。
+
+> 判定依据是**大小 + 修改时间**。改了内容一般也就会改修改时间，所以会被正确重传；
+> 只有"内容变了但大小和修改时间都没变"这种刻意为之的情况才会漏判。
+> 换机器或删掉那个索引文件也不影响正确性 —— 只是会重传一次，之后恢复正常。
+
 上传后的对象路径规则是 **前缀 + 被备份目录自己的名字 + 相对路径**。例如备份
 `D:\projects\projects\yy`（里面是 `11`、`22` 两个子文件夹），桶里会出现：
 
@@ -296,6 +304,10 @@ workspace-backup/yy/22/...
 >
 > **限额**：最多 2000 个文件、单个文件最大 256 MB、总量 2 GB。触发上限时界面会提示
 > 「已触到文件数上限」。限额只用来防止误选了整个磁盘，正常项目碰不到。
+>
+> **超过 8 MB 的文件走分片上传**（`@aws-sdk/lib-storage`，每片 8 MB、4 片并发），
+> 内存占用恒定，不再随文件大小增长 —— 几百 MB 的单个文件也能传
+> （上限由 S3 协议决定，与插件内存无关）。
 
 ### 《接数据》（备份前的小游戏）
 
@@ -516,7 +528,7 @@ CI（GitHub Actions）里还跑 **Gitleaks**，会扫描提交历史，一旦发
 ```bash
 pnpm install
 pnpm run build          # 编译 host（tsc）+ 打包 client（esbuild）
-pnpm test               # 220 个单元测试
+pnpm test               # 244 个单元测试
 pnpm run typecheck:client
 pnpm run check:secrets
 pnpm run check:load
@@ -532,7 +544,8 @@ src/
   dotenv.ts             启动时补读 `.env`（**只读，永不写入**；优先级高于系统环境）
   settings.ts           设置读写（只存非机密项）
   auto-backup.ts        自动备份：防抖 + 指数退避重试 + 对象键净化
-  manual-backup.ts      批量备份：目录遍历、排除名单、限额、逐个上传
+  manual-backup.ts      批量备份：目录遍历、排除名单、限额、查重、逐个上传
+  upload-index.ts       已上传文件索引（只存大小与修改时间，用于跳过没变化的文件）
   upload.ts             S3 客户端构造 + PutObject
   redact.ts             出口脱敏
   client/               界面（设置页 / 侧边栏 / 主面板）

@@ -17,6 +17,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { basename, join, relative } from 'node:path'
 import { sanitizeObjectKeyTail } from './auto-backup.js'
 import { safeErrorMessage } from './redact.js'
+import type { FileFingerprint, UploadIndex } from './upload-index.js'
 
 /** 遍历时整体跳过的目录名。 */
 export const SKIP_DIRS: ReadonlySet<string> = new Set([
@@ -69,14 +70,21 @@ export interface BackupPlan {
   readonly totalBytes: number
   /** 遍历过程中读目录/取属性失败的文件数。 */
   readonly unreadable: number
+  /**
+   * 每个文件的指纹（`size` + `mtimeMs`），供上传阶段跳过"没变化"的文件。
+   *
+   * 遍历时本来就 `stat` 过一次，顺手记下来，省得上传阶段再 stat 一遍。
+   * 取不到 `mtimeMs` 的文件**不会**出现在这里 —— 查重宁可漏跳，不能误跳。
+   */
+  readonly fingerprints: ReadonlyMap<string, FileFingerprint>
 }
 
 /** 可注入的遍历依赖（测试用）。 */
 export interface CollectDeps {
   /** 读目录，默认 `node:fs/promises`。 */
   readonly readdir?: (path: string) => Promise<Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>>
-  /** 取文件属性，默认 `node:fs/promises`。 */
-  readonly stat?: (path: string) => Promise<{ size: number }>
+  /** 取文件属性，默认 `node:fs/promises`。缺 `mtimeMs` 时该文件不参与查重。 */
+  readonly stat?: (path: string) => Promise<{ size: number; mtimeMs?: number }>
 }
 
 /**
@@ -102,6 +110,7 @@ export async function collectBackupPlan(
 
   const files: string[] = []
   const skippedDirs: string[] = []
+  const fingerprints = new Map<string, FileFingerprint>()
   let skippedFiles = 0
   let unreadable = 0
   let totalBytes = 0
@@ -138,8 +147,11 @@ export async function collectBackupPlan(
         return
       }
       let size = 0
+      let mtimeMs: number | undefined
       try {
-        size = (await statOf(full)).size
+        const info = await statOf(full)
+        size = info.size
+        mtimeMs = info.mtimeMs
       } catch {
         unreadable += 1
         continue
@@ -150,11 +162,16 @@ export async function collectBackupPlan(
       }
       files.push(full)
       totalBytes += size
+      // 顺手记下指纹：上传阶段据此判断"要不要跳过"。取不到 mtimeMs 就不记 ——
+      // 查重宁可漏跳（多传一次），也不能误跳（漏掉一次真实的改动）。
+      if (typeof mtimeMs === 'number' && Number.isFinite(mtimeMs)) {
+        fingerprints.set(full, { size, mtimeMs })
+      }
     }
   }
 
   await walk(root)
-  return { root, files, skippedDirs, skippedFiles, truncated, totalBytes, unreadable }
+  return { root, files, skippedDirs, skippedFiles, truncated, totalBytes, unreadable, fingerprints }
 }
 
 /** 上传进度。 */
@@ -165,6 +182,8 @@ export interface ManualProgress {
   readonly done: number
   /** 已失败数。 */
   readonly failed: number
+  /** 因"没变化"被跳过的数。 */
+  readonly skipped: number
   /** 当前文件的键尾部。 */
   readonly current: string
 }
@@ -177,6 +196,8 @@ export interface ManualResult {
   readonly uploaded: number
   /** 失败数。 */
   readonly failed: number
+  /** 因"内容没变、已经传过"而跳过的文件数。 */
+  readonly skippedUnchanged: number
   /** 成功的总字节数。 */
   readonly bytes: number
   /** 是否因限额被截断。 */
@@ -199,6 +220,10 @@ export interface ManualBackupDeps {
   readonly onProgress?: (progress: ManualProgress) => void
   /** 路径 → 键尾部；默认取相对 root 的路径。 */
   readonly toKeyTail?: (root: string, filePath: string) => string
+  /** 已上传文件索引；给了它就默认开启查重。 */
+  readonly index?: UploadIndex
+  /** 是否跳过没变化的文件；默认 = 是否提供了 {@link UploadIndex}。 */
+  readonly skipUnchanged?: boolean
 }
 
 /** 结果里最多保留几条失败原因。 */
@@ -226,35 +251,64 @@ function defaultKeyTail(root: string, filePath: string): string {
 /**
  * 逐个上传计划里的文件。单个失败不中断整体。
  *
- * @param deps - 计划、前缀、上传实现。
+ * **会跳过"没变化"的文件**：计划里带指纹（遍历时的 `size` + `mtimeMs`），
+ * 和 {@link ManualBackupDeps.index} 里记的一比就知道传过没传过 ——
+ * 批量备份每次都会把整个目录走一遍，不查重的话几千个没动过的文件会被一遍遍重传。
+ *
+ * @param deps - 计划、前缀、上传实现、可选索引。
  * @returns 汇总结果。
  */
 export async function runManualBackup(deps: ManualBackupDeps): Promise<ManualResult> {
   const { plan } = deps
   const toKeyTail = deps.toKeyTail ?? defaultKeyTail
+  const index = deps.index
+  // 没给索引就没法查重；给了索引则默认查重（用户要的就是"别老传一样的"）。
+  const skipUnchanged = deps.skipUnchanged ?? index !== undefined
   const errors: string[] = []
   let uploaded = 0
   let failed = 0
+  let skippedUnchanged = 0
   let bytes = 0
 
-  for (const [index, filePath] of plan.files.entries()) {
+  for (const [position, filePath] of plan.files.entries()) {
     const tail = sanitizeObjectKeyTail(toKeyTail(plan.root, filePath))
     const objectKey = `${deps.prefix}${tail}`
-    try {
-      const result = await deps.upload({ filePath, objectKey })
-      uploaded += 1
-      bytes += result.bytes
-    } catch (error) {
-      failed += 1
-      if (errors.length < MAX_ERRORS) errors.push(safeErrorMessage(error))
+    const fingerprint = plan.fingerprints.get(filePath)
+
+    // 指纹与索引都齐全、且完全一致 → 这份内容已经在桶里了，跳过。
+    if (
+      skipUnchanged &&
+      index !== undefined &&
+      fingerprint !== undefined &&
+      index.isUnchanged(objectKey, fingerprint)
+    ) {
+      skippedUnchanged += 1
+    } else {
+      try {
+        const result = await deps.upload({ filePath, objectKey })
+        uploaded += 1
+        bytes += result.bytes
+        // 只有真正传成功了才记账 —— 失败的文件下次还得再试。
+        if (fingerprint !== undefined) index?.remember(objectKey, fingerprint)
+      } catch (error) {
+        failed += 1
+        if (errors.length < MAX_ERRORS) errors.push(safeErrorMessage(error))
+      }
     }
-    deps.onProgress?.({ total: plan.files.length, done: index + 1, failed, current: tail })
+    deps.onProgress?.({
+      total: plan.files.length,
+      done: position + 1,
+      failed,
+      skipped: skippedUnchanged,
+      current: tail,
+    })
   }
 
   return {
     total: plan.files.length,
     uploaded,
     failed,
+    skippedUnchanged,
     bytes,
     truncated: plan.truncated,
     skippedFiles: plan.skippedFiles,

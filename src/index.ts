@@ -15,7 +15,7 @@
  * @module dsh-plugin-oss-backup
  */
 
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -44,6 +44,7 @@ import {
 } from './credential-store.js'
 import { loadDotenv, type DotenvLoadResult } from './dotenv.js'
 import { hydrateEnvironment } from './env-source.js'
+import { UploadIndex } from './upload-index.js'
 import {
   describeOssEnvironment,
   ENV_NAMES,
@@ -414,6 +415,46 @@ export function apply(ctx: PluginContext): void {
   const fromDotenv = new Set<string>()
 
   /**
+   * 已上传文件的本地索引 —— 用来跳过"没变化"的文件。
+   *
+   * 只记 `(size, mtimeMs)`，**不含任何机密**，位置与设置文件同级。
+   * 索引丢了或坏了只会导致"下次重传一轮"，不会有正确性问题。
+   */
+  let uploadIndex = new UploadIndex()
+
+  /** 索引文件路径。 */
+  const uploadIndexPath = (): string => join(dshHome(), 'oss-backup', 'uploaded.json')
+
+  /**
+   * 从磁盘读索引。**任何失败都退化成空索引** —— 它只是优化，不能挡住备份。
+   */
+  const loadUploadIndex = async (): Promise<void> => {
+    try {
+      uploadIndex = UploadIndex.parse(await readFile(uploadIndexPath(), 'utf8'))
+    } catch {
+      uploadIndex = new UploadIndex()
+    }
+  }
+
+  /**
+   * 把索引写回磁盘。
+   *
+   * 先写临时文件再改名：中途崩了也不会留下半个 JSON 把下次的索引带坏。
+   * 写失败只记一条日志 —— 索引丢了大不了重传一轮。
+   */
+  const persistUploadIndex = async (): Promise<void> => {
+    const target = uploadIndexPath()
+    try {
+      await mkdir(dirname(target), { recursive: true })
+      const temp = `${target}.tmp`
+      await writeFile(temp, uploadIndex.serialize(), 'utf8')
+      await rename(temp, target)
+    } catch (error) {
+      ctx.logger.warn(`[oss-backup] 上传索引写盘失败（不影响本次备份）：${safeErrorMessage(error)}`)
+    }
+  }
+
+  /**
    * `.env` 的候选路径（按优先级从高到低）。
    *
    * 先看插件自己的配置目录（`<DSH home>/oss-backup/.env`），再看当前工作目录。
@@ -684,6 +725,8 @@ export function apply(ctx: PluginContext): void {
 
     // ⑤ 最后尝试载入已加密保存的凭证（未开启持久化时这一步什么都不做）。
     await loadStoredCredentials()
+    // ⑤' 读上传索引：批量备份据此跳过没变化的文件。
+    await loadUploadIndex()
     applyAutoBackup()
     applySchedule()
 
@@ -836,17 +879,22 @@ export function apply(ctx: PluginContext): void {
       if (state.manual !== null) {
         state.manual = {
           ...state.manual,
-          progress: { total: plan.files.length, done: 0, failed: 0, current: '' },
+          progress: { total: plan.files.length, done: 0, failed: 0, skipped: 0, current: '' },
         }
       }
       const result = await runManualBackup({
         plan,
         prefix: settings.prefix,
         upload: (input) => uploadFileToOss(input),
+        // 查重：内容没变、已经传过的文件直接跳过。批量备份每次都会把整个目录走一遍，
+        // 不查重的话几千个没动过的文件会被一遍遍重传。
+        index: uploadIndex,
         onProgress: (progress) => {
           if (state.manual !== null) state.manual = { ...state.manual, progress }
         },
       })
+      // 传完把索引落盘；写失败不影响这次备份的结果，下次重传一轮而已。
+      await persistUploadIndex()
       if (state.manual !== null) state.manual = { ...state.manual, running: false, result }
       ctx.logger.info(
         `[oss-backup] 手动备份结束：成功 ${result.uploaded} / 失败 ${result.failed}，共 ${result.bytes} 字节${result.truncated ? '（触到文件数上限）' : ''}`,
@@ -863,6 +911,7 @@ export function apply(ctx: PluginContext): void {
             total: 0,
             uploaded: 0,
             failed: 0,
+            skippedUnchanged: 0,
             bytes: 0,
             truncated: false,
             skippedFiles: 0,
@@ -1014,7 +1063,7 @@ export function apply(ctx: PluginContext): void {
             running: true,
             startedAt: new Date().toISOString(),
             root,
-            progress: { total: 0, done: 0, failed: 0, current: '' },
+            progress: { total: 0, done: 0, failed: 0, skipped: 0, current: '' },
             result: null,
           }
           sendJson(response, 200, { ok: true, started: true, root })
