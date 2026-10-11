@@ -9,7 +9,7 @@
 
 1. **优先用密钥管理器把凭证注入环境变量。** 1Password CLI（`op run -- dsh web`）、
    HashiCorp Vault、AWS Secrets Manager、Azure Key Vault、Doppler、direnv 都行 ——
-   插件只读 `process.env`，不关心值从哪来，所以**让密钥留在它该待的地方**，
+   插件只读 `process.env`，所以**让密钥留在它该待的地方**，
    远比复制粘贴到某个文件里安全。具体接法见 **[凭证接入指南](docs/credential-sources.md)**。
 2. **不要用主账号密钥。** 请新建一个**只能读写指定桶**的子账号，只给它 `PutObject` 权限。
    本文「[第 2 步](#第-2-步创建最小权限子账号必做)」有现成的配置可抄。
