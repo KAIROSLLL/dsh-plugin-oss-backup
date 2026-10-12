@@ -78,9 +78,6 @@ const IDLE_POLL_MS = 2000
 /** 上传进行中的轮询间隔（毫秒）：要让人看得见"正在上传"，就不能等太久。 */
 const BUSY_POLL_MS = 1000
 
-/** 「云端备份」按钮的目标：RustFS 控制台。 */
-export const CONSOLE_URL = 'http://127.0.0.1:9001/'
-
 /** 侧栏那张图的宽度（像素）。 */
 const SIDEBAR_SHOT_WIDTH = 140
 
@@ -225,7 +222,7 @@ function formatTime(iso: string): string {
 }
 
 /**
- * 打开 RustFS 控制台。
+ * 在浏览器里打开一个外部控制台地址。
  *
  * 用 `window.open` 而不是宿主路由：目标是一个外部 Web 界面，让浏览器/Electron
  * 自己决定开新标签还是新窗口最省事。
@@ -234,12 +231,14 @@ function formatTime(iso: string): string {
  * **永远返回 null**（踩过：窗口明明开了，界面却提示"浏览器拦下了新窗口"）。
  * 所以这里先不带 noopener 打开以拿到窗口引用，拿到后再断掉 opener —— 安全性等价。
  *
+ * @param url - 目标地址。由宿主按 provider 推导（`env.ts` 的 `consoleUrl`）：
+ *   RustFS 是本机网页控制台，阿里云 / AWS 是对应的云控制台。
  * @returns `opened` 表示已发起且未被拦截；`blocked` 表示确实被弹窗策略拦下。
  */
-export function openConsole(): 'opened' | 'blocked' {
+export function openConsole(url: string): 'opened' | 'blocked' {
   try {
     if (typeof window === 'undefined' || typeof window.open !== 'function') return 'blocked'
-    const opened = window.open(CONSOLE_URL, '_blank')
+    const opened = window.open(url, '_blank')
     if (opened === null) return 'blocked'
     try {
       // 断开 opener 引用（等价于 rel=noopener）。跨源时可能被拒，忽略即可。
@@ -599,14 +598,33 @@ function UploadBlock(props: { snapshot: StateSnapshot }): React.ReactElement {
 }
 
 /**
- * 「云端备份」块：打开 RustFS 控制台。
+ * 「云端备份」块：打开当前 provider 的网页控制台。
+ *
+ * 地址由**宿主**按 provider 推导（`env.ts` 的 `consoleUrl`）：
+ * RustFS/MinIO 是本机控制台（S3 端口 +1），阿里云与 AWS 是对应的云控制台并直达当前这个桶。
+ * 这样按钮不必写死任何一家 —— 换 provider 之后它自己就指对了。
  *
  * 地址同时做成真链接：万一是浏览器弹窗策略真拦下了，点链接照样能打开，不必手抄 URL。
  *
+ * @param props - 快照（从中取 `environment.consoleUrl`）。
  * @returns React 元素。
  */
-function ConsoleBlock(): React.ReactElement {
+function ConsoleBlock(props: { snapshot: StateSnapshot }): React.ReactElement {
   const [note, setNote] = useState('')
+  const url = props.snapshot.environment.consoleUrl
+  const label = props.snapshot.environment.providerLabel
+
+  if (url === null) {
+    return React.createElement('div', { className: 'ob-block' }, [
+      React.createElement('span', { className: 'ob-sect-title', key: 't' }, '云端备份'),
+      React.createElement(
+        'div',
+        { className: 'ob-hint', key: 'none' },
+        `${label} 的网页控制台地址推导不出来（端点或桶还没配好）。配好之后再回来看这里。`,
+      ),
+    ])
+  }
+
   return React.createElement('div', { className: 'ob-block' }, [
     React.createElement('span', { className: 'ob-sect-title', key: 't' }, '云端备份'),
     React.createElement('div', { className: 'ob-row', key: 'row' }, [
@@ -618,7 +636,7 @@ function ConsoleBlock(): React.ReactElement {
           className: 'ob-btn-primary',
           onClick: () => {
             // 只有真的返回 null（确实被拦下）才提示 —— "带 noopener 时永远返回 null" 那个坑已经避开。
-            setNote(openConsole() === 'blocked' ? '浏览器拦下了新窗口，点右边的地址即可打开。' : '')
+            setNote(openConsole(url) === 'blocked' ? '浏览器拦下了新窗口，点右边的地址即可打开。' : '')
           },
         },
         '云端备份',
@@ -628,11 +646,11 @@ function ConsoleBlock(): React.ReactElement {
         {
           key: 'url',
           className: 'ob-link',
-          href: CONSOLE_URL,
+          href: url,
           target: '_blank',
           rel: 'noopener noreferrer',
         },
-        CONSOLE_URL,
+        url,
       ),
     ]),
     note === '' ? null : React.createElement('div', { className: 'ob-warn', key: 'note' }, note),
@@ -1817,7 +1835,7 @@ export function OssPanel(props: { variant?: 'settings' | 'panel' }): React.React
           })
         : React.createElement(UploadBlock, { key: 'upload', snapshot }),
 
-    React.createElement(ConsoleBlock, { key: 'console' }),
+    snapshot === null ? null : React.createElement(ConsoleBlock, { key: 'console', snapshot }),
 
     // 手动备份紧跟在「云端备份」下面 —— 这两个是"动手做点什么"的一组，放一起更顺。
     snapshot === null

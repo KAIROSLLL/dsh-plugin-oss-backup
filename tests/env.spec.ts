@@ -131,6 +131,90 @@ describe('describeOssEnvironment', () => {
   })
 })
 
+describe('「云端备份」控制台地址推导', () => {
+  it('RustFS：控制台在 S3 端口 +1（9000 → 9001）', () => {
+    const report = describeOssEnvironment({ ...COMPLETE_ENV })
+    expect(report.consoleUrl).toBe('http://127.0.0.1:9001/')
+  })
+
+  it('RustFS：自定义端口同样 +1', () => {
+    const report = describeOssEnvironment({ ...COMPLETE_ENV, RUSTFS_ENDPOINT: 'http://nas.local:8080' })
+    expect(report.consoleUrl).toBe('http://nas.local:8081/')
+  })
+
+  it('RustFS：端点没写端口时补默认的 9001', () => {
+    const report = describeOssEnvironment({ ...COMPLETE_ENV, RUSTFS_ENDPOINT: 'https://s3.example.com' })
+    expect(report.consoleUrl).toBe('https://s3.example.com:9001/')
+  })
+
+  it('RustFS：端点不是合法 URL 时推导不出来（返回 null，而不是抛异常）', () => {
+    const report = describeOssEnvironment({ ...COMPLETE_ENV, RUSTFS_ENDPOINT: 'http://[bad' })
+    expect(report.consoleUrl).toBeNull()
+  })
+
+  it('阿里云：直达当前这个桶的对象列表', () => {
+    const report = describeOssEnvironment({
+      OSS_PROVIDER: 'aliyun',
+      OSS_BUCKET: 'my-bucket',
+      OSS_REGION: 'oss-cn-beijing',
+      OSS_ACCESS_KEY_ID: 'id',
+      OSS_ACCESS_KEY_SECRET: 'secret',
+    })
+    expect(report.consoleUrl).toBe('https://oss.console.aliyun.com/bucket/oss-cn-beijing/my-bucket/object')
+  })
+
+  it('阿里云：区域留空时用默认区域', () => {
+    const report = describeOssEnvironment({
+      OSS_PROVIDER: 'aliyun',
+      OSS_BUCKET: 'my-bucket',
+      OSS_ACCESS_KEY_ID: 'id',
+      OSS_ACCESS_KEY_SECRET: 'secret',
+    })
+    expect(report.consoleUrl).toContain('oss-cn-hangzhou')
+  })
+
+  it('AWS：带上 region 直达桶', () => {
+    const report = describeOssEnvironment({
+      OSS_PROVIDER: 'aws',
+      AWS_BUCKET: 'my-bucket',
+      AWS_REGION: 'us-west-2',
+      AWS_ACCESS_KEY_ID: 'id',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+    })
+    expect(report.consoleUrl).toBe('https://s3.console.aws.amazon.com/s3/buckets/my-bucket?region=us-west-2')
+  })
+
+  it('桶名要做 URL 编码（桶名里不该有特殊字符，但别让它破坏链接）', () => {
+    const report = describeOssEnvironment({
+      OSS_PROVIDER: 'aws',
+      AWS_BUCKET: 'a b',
+      AWS_REGION: 'us-west-2',
+      AWS_ACCESS_KEY_ID: 'id',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+    })
+    expect(report.consoleUrl).toContain('a%20b')
+  })
+
+  it('桶还没配时给出控制台首页，而不是 null', () => {
+    const report = describeOssEnvironment({
+      OSS_PROVIDER: 'aws',
+      AWS_REGION: 'us-west-2',
+      AWS_ACCESS_KEY_ID: 'id',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+    })
+    expect(report.consoleUrl).toBe('https://s3.console.aws.amazon.com/s3')
+  })
+
+  it('**控制台地址里不含任何凭证**（拼链接用的是未脱敏端点，但那只涉及主机名）', () => {
+    const report = describeOssEnvironment({
+      ...COMPLETE_ENV,
+      RUSTFS_ENDPOINT: 'http://someuser:somepass@127.0.0.1:9000',
+    })
+    expect(report.consoleUrl ?? '').not.toContain('somepass')
+    expect(report.consoleUrl ?? '').not.toContain('someuser')
+  })
+})
+
 describe('provider 抽象', () => {
   it('未设置 OSS_PROVIDER 时默认 rustfs（既有配置不受影响）', () => {
     expect(readProvider({}).provider).toBe('rustfs')

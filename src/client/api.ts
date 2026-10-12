@@ -43,6 +43,13 @@ export interface EnvironmentReport {
    * **变量配齐 ≠ 服务在跑** —— 这一项才是"能不能用"。`null` 表示还没探过。
    */
   reachability: ReachabilityReport | null
+  /**
+   * 「云端备份」按钮要打开的网页控制台地址（宿主按 provider 推导）。
+   *
+   * RustFS/MinIO 是本机控制台（S3 端口 +1）；阿里云 / AWS 是对应的云控制台且直达当前桶。
+   * 推导不出来时为 `null`。
+   */
+  consoleUrl: string | null
 }
 
 /** 一次可达性探测的结果。 */
@@ -357,6 +364,8 @@ function toSnapshot(value: unknown): StateSnapshot | null {
         region: typeof variableNames.region === 'string' ? variableNames.region : 'RUSTFS_REGION',
       },
       reachability: toReachability(env.reachability),
+      // 缺字段（旧版宿主）时为 null，界面会退回"推导不出来"的提示而不是崩掉。
+      consoleUrl: typeof env.consoleUrl === 'string' ? env.consoleUrl : null,
     },
     credentials: toCredentialReport(record.credentials),
     dotenv: toDotenvReport(record.dotenv),

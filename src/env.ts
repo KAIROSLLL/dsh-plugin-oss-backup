@@ -20,6 +20,16 @@ export type OssProvider = 'rustfs' | 'aliyun' | 'aws'
 /** 选择 provider 的环境变量名。 */
 export const PROVIDER_ENV = 'OSS_PROVIDER'
 
+/** 推导控制台链接时能拿到的信息。 */
+export interface ConsoleLinkInput {
+  /** 端点（已规范化、**未脱敏** —— 拼链接需要真实主机名）；未知为 `null`。 */
+  readonly endpoint: string | null
+  /** 存储桶；未设置为 `null`。 */
+  readonly bucket: string | null
+  /** 生效区域（可能是默认值）。 */
+  readonly region: string
+}
+
 /** provider 的配置档案。 */
 export interface ProviderProfile {
   /** 标识。 */
@@ -54,6 +64,14 @@ export interface ProviderProfile {
   readonly endpointHint: string
   /** 由区域推导端点（阿里云：`oss-cn-hangzhou` → `https://oss-cn-hangzhou.aliyuncs.com`）。 */
   readonly endpointFromRegion?: (region: string) => string
+  /**
+   * 推导「**云端备份**」按钮要打开的控制台地址。
+   *
+   * 三个 provider 的网页控制台各不相同：自建的 RustFS/MinIO 就在本机（S3 端口 +1），
+   * 阿里云与 AWS 则是各自的云控制台，还能直接落到具体那个桶上。
+   * 推导不出来时返回 `null`，界面会退回"只显示地址不提供跳转"。
+   */
+  readonly consoleUrl?: (input: ConsoleLinkInput) => string | null
 }
 
 /** 三个 provider 的档案表。 */
@@ -72,6 +90,18 @@ export const PROFILES: Readonly<Record<OssProvider, ProviderProfile>> = {
     forcePathStyle: true,
     endpointRequired: true,
     endpointHint: 'http://127.0.0.1:9000（必填）',
+    // RustFS / MinIO 的网页控制台默认在 S3 端口 **+1**（9000 → 9001）。
+    consoleUrl: ({ endpoint }) => {
+      if (endpoint === null) return null
+      try {
+        const url = new URL(endpoint)
+        const port = url.port === '' ? '9001' : String(Number(url.port) + 1)
+        return `${url.protocol}//${url.hostname}:${port}/`
+      } catch {
+        // 端点不是合法 URL（理论上不会 —— 前面已经规范化过）→ 推导不出来。
+        return null
+      }
+    },
   },
   aliyun: {
     provider: 'aliyun',
@@ -89,6 +119,13 @@ export const PROFILES: Readonly<Record<OssProvider, ProviderProfile>> = {
     endpointRequired: false,
     endpointHint: 'https://oss-cn-hangzhou.aliyuncs.com（留空则按区域推导）',
     endpointFromRegion: (region) => `https://${region}.aliyuncs.com`,
+    // 云控制台可以直接落到**具体那个桶**的对象列表页。
+    consoleUrl: ({ region, bucket }) => {
+      const base = 'https://oss.console.aliyun.com'
+      if (bucket === null) return `${base}/bucket`
+      const zone = region === '' ? 'oss-cn-hangzhou' : region
+      return `${base}/bucket/${encodeURIComponent(zone)}/${encodeURIComponent(bucket)}/object`
+    },
   },
   aws: {
     provider: 'aws',
@@ -104,6 +141,14 @@ export const PROFILES: Readonly<Record<OssProvider, ProviderProfile>> = {
     forcePathStyle: false,
     endpointRequired: false,
     endpointHint: '留空即用 AWS 标准端点（常用 AWS_ENDPOINT 指向兼容实现）',
+    consoleUrl: ({ region, bucket }) => {
+      const base = 'https://s3.console.aws.amazon.com/s3'
+      if (bucket === null) return base
+      const key = encodeURIComponent(bucket)
+      return region === ''
+        ? `${base}/buckets/${key}`
+        : `${base}/buckets/${key}?region=${encodeURIComponent(region)}`
+    },
   },
 }
 
@@ -340,6 +385,13 @@ export interface OssEnvironmentReport {
   }
   /** 端点提示（示例 / 留空行为）。 */
   readonly endpointHint: string
+  /**
+   * 「云端备份」按钮要打开的控制台地址。
+   *
+   * 自建的 RustFS/MinIO 是本机网页控制台（S3 端口 +1）；阿里云与 AWS 是各自的
+   * 云控制台，并直接落到**当前这个桶**。推导不出来时为 `null`。
+   */
+  readonly consoleUrl: string | null
 }
 
 /**
@@ -396,6 +448,20 @@ export function describeOssEnvironment(env: NodeJS.ProcessEnv = process.env): Os
       region: profile.env.region,
     },
     endpointHint: profile.endpointHint,
+    /*
+     * 「云端备份」按钮的跳转目标。
+     *
+     * 刻意用**未脱敏**的 `derived` 去拼：控制台链接需要真实主机名（脱敏版会把
+     * userinfo 换成 `***`）。桶名不是机密，主机名也不是 —— 用户本来就知道自己去连哪。
+     */
+    consoleUrl:
+      profile.consoleUrl?.({
+        // 用**规范化后**的端点：用户常写成 `127.0.0.1:9000`（不带 scheme），
+        // 而 `new URL()` 解析不了这种写法 —— 不补 scheme 的话按钮会静默失效。
+        endpoint: derived === null ? null : normalizeEndpoint(derived),
+        bucket: hasBucket ? (readNonEmpty(env, profile.env.bucket) ?? null) : null,
+        region,
+      }) ?? null,
   }
 }
 
